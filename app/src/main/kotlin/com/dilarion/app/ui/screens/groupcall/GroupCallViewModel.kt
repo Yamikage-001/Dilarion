@@ -3,9 +3,11 @@ package com.dilarion.app.ui.screens.groupcall
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.dilarion.app.calls.notifyConferenceLeft
 import com.dilarion.app.data.api.ApiService
 import com.dilarion.app.data.model.GroupCallStartRequest
 import com.dilarion.app.security.SessionManager
+import com.dilarion.app.services.PresenceService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.livekit.android.ConnectOptions
@@ -15,6 +17,7 @@ import io.livekit.android.RoomOptions
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.Participant
+import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -57,6 +60,7 @@ class GroupCallViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val apiService: ApiService,
     private val sessionManager: SessionManager,
+    private val presenceService: PresenceService,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(GroupCallUiState())
@@ -69,6 +73,24 @@ class GroupCallViewModel @Inject constructor(
     private var started = false
     private var everHadOthers = false
     private var noAnswerJob: Job? = null
+    /** Left the call. Later LiveKit track events must not put their tile back. */
+    private val departed = mutableSetOf<String>()
+
+    init {
+        viewModelScope.launch {
+            presenceService.events.collect { event ->
+                if (event.type != "conference_participant_left") return@collect
+                val data = event.data ?: return@collect
+                val confId = data.get("conference_id")?.takeIf { !it.isJsonNull }?.asInt ?: return@collect
+                if (confId != conferenceId) return@collect
+                val who = data.get("username")?.takeIf { !it.isJsonNull }?.asString ?: return@collect
+                departed.add(who)
+                removeTile(who)
+                reconcileTiles()
+                othersChanged()
+            }
+        }
+    }
 
     companion object {
         private const val NO_ANSWER_MS = 60_000L
@@ -109,8 +131,18 @@ class GroupCallViewModel @Inject constructor(
             viewModelScope.launch {
                 r.events.events.collect { event ->
                     when (event) {
-                        is RoomEvent.ParticipantConnected -> { upsertTile(event.participant, false); othersChanged() }
-                        is RoomEvent.ParticipantDisconnected -> { removeTile(event.participant.identity?.value ?: ""); othersChanged() }
+                        is RoomEvent.ParticipantConnected -> {
+                            departed.remove(participantKey(event.participant))
+                            upsertTile(event.participant, false)
+                            othersChanged()
+                        }
+                        is RoomEvent.ParticipantDisconnected -> {
+                            val key = participantKey(event.participant)
+                            if (key.isNotBlank()) departed.add(key)
+                            removeTile(key)
+                            reconcileTiles()
+                            othersChanged()
+                        }
                         is RoomEvent.TrackSubscribed -> upsertTile(event.participant, false)
                         is RoomEvent.TrackUnsubscribed -> upsertTile(event.participant, false)
                         is RoomEvent.TrackMuted -> refresh(event.participant)
@@ -167,9 +199,21 @@ class GroupCallViewModel @Inject constructor(
         }
     }
 
+    private fun participantKey(p: Participant): String {
+        p.identity?.value?.takeIf { it.isNotBlank() }?.let { return it }
+        return p.sid.value.takeIf { it.isNotBlank() }?.let { "sid:$it" } ?: ""
+    }
+
+    /** Camera, not screen share. The first publication is often the wrong one. */
+    private fun cameraTrack(p: Participant): VideoTrack? {
+        val pubs = p.videoTrackPublications
+        val camera = pubs.firstOrNull { it.first.source == Track.Source.CAMERA }?.second as? VideoTrack
+        return camera ?: pubs.firstOrNull()?.second as? VideoTrack
+    }
+
     private fun tileFrom(p: Participant, isLocal: Boolean): GroupCallTile {
-        val videoTrack = p.videoTrackPublications.firstOrNull()?.second as? VideoTrack
-        val identity = p.identity?.value ?: ""
+        val videoTrack = cameraTrack(p)
+        val identity = participantKey(p)
         return GroupCallTile(
             identity = identity,
             displayName = p.name?.takeIf { it.isNotBlank() } ?: identity,
@@ -182,12 +226,31 @@ class GroupCallViewModel @Inject constructor(
 
     private fun upsertTile(p: Participant, isLocal: Boolean) {
         val tile = tileFrom(p, isLocal)
+        if (tile.identity.isBlank() || tile.identity in departed) return
         val prevSpeaking = _uiState.value.tiles.find { it.identity == tile.identity }?.isSpeaking ?: false
         val others = _uiState.value.tiles.filterNot { it.identity == tile.identity }
         _uiState.value = _uiState.value.copy(
             // Keep "you" first so the grid order is stable.
             tiles = (others + tile.copy(isSpeaking = prevSpeaking)).sortedBy { if (it.isLocal) 0 else 1 },
         )
+        reconcileTiles()
+    }
+
+    /** Drop anyone no longer in the room, even if the disconnect event had no identity. */
+    private fun reconcileTiles() {
+        val r = room ?: return
+        val live = buildSet {
+            participantKey(r.localParticipant).takeIf { it.isNotBlank() }?.let { add(it) }
+            r.remoteParticipants.values.forEach { p ->
+                participantKey(p).takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+        }
+        if (live.isEmpty()) return
+        val current = _uiState.value.tiles
+        val next = current.filter { it.identity in live }
+        if (next.size != current.size) {
+            _uiState.value = _uiState.value.copy(tiles = next)
+        }
     }
 
     private fun refresh(p: Participant) {
@@ -228,12 +291,7 @@ class GroupCallViewModel @Inject constructor(
         room?.release()
         room = null
         val confId = conferenceId
-        if (confId > 0) {
-            viewModelScope.launch {
-                val token = sessionManager.sessionToken.first() ?: return@launch
-                runCatching { apiService.conferenceLeave("Bearer $token", confId) }
-            }
-        }
+        if (confId > 0) notifyConferenceLeft(sessionManager, apiService, confId)
         _uiState.value = _uiState.value.copy(status = GroupCallStatus.ENDED, endReason = reason)
     }
 

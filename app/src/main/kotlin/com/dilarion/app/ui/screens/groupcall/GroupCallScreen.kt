@@ -6,9 +6,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -128,22 +125,13 @@ fun GroupCallScreen(
                 }
             }
 
-            // Body
+            // Body. Every participant shares the screen. A scrolling grid with a
+            // fixed tile height only fitted two faces on a phone, so the third
+            // person was clipped and the call looked like a two-tile view.
             Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 10.dp)) {
                 val others = state.tiles.count { !it.isLocal }
                 if (state.status == GroupCallStatus.ACTIVE && others > 0 && room != null) {
-                    val cols = if (state.tiles.size <= 2) 1 else 2
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(cols),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        items(state.tiles, key = { it.identity }) { tile ->
-                            val h = if (state.tiles.size <= 2) 300.dp else 220.dp
-                            CallTile(room, tile, Modifier.fillMaxWidth().height(h))
-                        }
-                    }
+                    EveryoneGrid(state.tiles, room, Modifier.fillMaxSize())
                 } else {
                     Column(
                         Modifier.fillMaxSize(),
@@ -198,6 +186,33 @@ fun GroupCallScreen(
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 80.dp, start = 16.dp, end = 16.dp),
                 action = { TextButton(onClick = viewModel::clearNotice) { Text("OK") } },
             ) { Text(notice) }
+        }
+    }
+}
+
+/** Every face on screen at once. Two columns, rows share the height. */
+@Composable
+private fun EveryoneGrid(tiles: List<GroupCallTile>, room: Room, modifier: Modifier) {
+    when (tiles.size) {
+        0 -> Box(modifier)
+        1 -> CallTile(room, tiles[0], modifier)
+        2 -> Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            tiles.forEach { tile ->
+                CallTile(room, tile, Modifier.weight(1f).fillMaxWidth())
+            }
+        }
+        else -> Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            tiles.chunked(2).forEach { row ->
+                Row(
+                    Modifier.weight(1f).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    row.forEach { tile ->
+                        CallTile(room, tile, Modifier.weight(1f).fillMaxHeight())
+                    }
+                    if (row.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
         }
     }
 }

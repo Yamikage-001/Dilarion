@@ -3,8 +3,6 @@ package com.dilarion.app.ui.screens.gallery
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -204,29 +202,25 @@ fun GalleryScreen(
                                 }
                             }
                         }
-                        // 3+: thumbnail strip across the top, active speaker (or
-                        // first remote participant) large below - Meet/Teams'
-                        // adaptive layout. Mirrors desktop's GalleryView.tsx.
+                        // 3+: every face shares the screen. A filmstrip plus one large
+                        // tile hid whoever didn't fit the strip on a phone, so
+                        // three people only ever saw two.
                         else -> {
-                            val mainTile = state.tiles.firstOrNull { it.isSpeaking && !it.isLocal }
-                                ?: state.tiles.firstOrNull { !it.isLocal }
-                                ?: state.tiles.firstOrNull()
-                            val sideTiles = state.tiles.filterNot { it.identity == mainTile?.identity }
-
-                            Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
-                                LazyRow(
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                                ) {
-                                    items(sideTiles, key = { it.identity }) { tile ->
-                                        Box(modifier = Modifier.width(110.dp)) {
-                                            GalleryTileView(tile = tile, room = room, compact = true)
+                            Column(
+                                modifier = Modifier.fillMaxSize().padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                state.tiles.chunked(2).forEach { row ->
+                                    Row(
+                                        Modifier.weight(1f).fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        row.forEach { tile ->
+                                            Box(Modifier.weight(1f).fillMaxHeight()) {
+                                                GalleryTileView(tile = tile, room = room, fill = true)
+                                            }
                                         }
-                                    }
-                                }
-                                mainTile?.let {
-                                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                                        GalleryTileView(tile = it, room = room)
+                                        if (row.size == 1) Spacer(Modifier.weight(1f))
                                     }
                                 }
                             }
@@ -358,12 +352,10 @@ private fun CtrlButton(icon: androidx.compose.ui.graphics.vector.ImageVector, on
 }
 
 @Composable
-private fun GalleryTileView(tile: GalleryTile, room: Room?, compact: Boolean = false) {
+private fun GalleryTileView(tile: GalleryTile, room: Room?, compact: Boolean = false, fill: Boolean = false) {
     val avatarSize = if (compact) 30.dp else 56.dp
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
+        modifier = (if (fill) Modifier.fillMaxSize() else Modifier.fillMaxWidth().aspectRatio(16f / 9f))
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF1A1A22))
             .then(

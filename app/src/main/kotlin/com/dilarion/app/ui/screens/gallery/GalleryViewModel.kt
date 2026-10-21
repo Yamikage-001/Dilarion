@@ -3,6 +3,7 @@ package com.dilarion.app.ui.screens.gallery
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.dilarion.app.calls.notifyConferenceLeft
 import com.dilarion.app.data.api.ApiService
 import com.dilarion.app.data.model.BreakoutGroupInput
 import com.dilarion.app.data.model.BreakoutStartRequest
@@ -20,6 +21,7 @@ import io.livekit.android.RoomOptions
 import io.livekit.android.events.RoomEvent
 import io.livekit.android.room.Room
 import io.livekit.android.room.participant.Participant
+import io.livekit.android.room.track.Track
 import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -95,6 +97,8 @@ class GalleryViewModel @Inject constructor(
     private var lastMicOn: Boolean = true
     private var lastCamOn: Boolean = true
     private var lastDisplayName: String? = null
+    /** Left the call. Later LiveKit track events must not put their tile back. */
+    private val departed = mutableSetOf<String>()
 
     init {
         viewModelScope.launch {
@@ -119,6 +123,15 @@ class GalleryViewModel @Inject constructor(
                         if (confId != currentConferenceId) return@collect
                         val from = data.get("from")?.takeIf { !it.isJsonNull }?.asString ?: return@collect
                         _uiState.value = _uiState.value.copy(whiteboardOwner = from)
+                    }
+                    "conference_participant_left" -> {
+                        val data = msg.data ?: return@collect
+                        val confId = data.get("conference_id")?.takeIf { !it.isJsonNull }?.asInt ?: return@collect
+                        if (confId != currentConferenceId && confId != parentConferenceId) return@collect
+                        val who = data.get("username")?.takeIf { !it.isJsonNull }?.asString ?: return@collect
+                        departed.add(who)
+                        removeTile(who)
+                        reconcileTiles()
                     }
                     "whiteboard_closed" -> {
                         val data = msg.data ?: return@collect
@@ -278,9 +291,20 @@ class GalleryViewModel @Inject constructor(
         }
     }
 
+    private fun participantKey(p: Participant): String {
+        p.identity?.value?.takeIf { it.isNotBlank() }?.let { return it }
+        return p.sid.value.takeIf { it.isNotBlank() }?.let { "sid:$it" } ?: ""
+    }
+
+    private fun cameraTrack(p: Participant): VideoTrack? {
+        val pubs = p.videoTrackPublications
+        val camera = pubs.firstOrNull { it.first.source == Track.Source.CAMERA }?.second as? VideoTrack
+        return camera ?: pubs.firstOrNull()?.second as? VideoTrack
+    }
+
     private fun tileFrom(p: Participant, isLocal: Boolean): GalleryTile {
-        val videoTrack = p.videoTrackPublications.firstOrNull()?.second as? VideoTrack
-        val identity = p.identity?.value ?: ""
+        val videoTrack = cameraTrack(p)
+        val identity = participantKey(p)
         return GalleryTile(
             identity = identity,
             displayName = p.name?.takeIf { it.isNotBlank() } ?: identity,
@@ -292,11 +316,29 @@ class GalleryViewModel @Inject constructor(
     }
 
     private fun upsertTile(p: Participant, isLocal: Boolean) {
-        val prevSpeaking = _uiState.value.tiles.find { it.identity == (p.identity?.value ?: "") }?.isSpeaking ?: false
-        val tile = tileFrom(p, isLocal).copy(isSpeaking = prevSpeaking)
+        val tile = tileFrom(p, isLocal)
+        if (tile.identity.isBlank() || tile.identity in departed) return
+        val prevSpeaking = _uiState.value.tiles.find { it.identity == tile.identity }?.isSpeaking ?: false
         _uiState.value = _uiState.value.copy(
-            tiles = _uiState.value.tiles.filterNot { it.identity == tile.identity } + tile,
+            tiles = _uiState.value.tiles.filterNot { it.identity == tile.identity } + tile.copy(isSpeaking = prevSpeaking),
         )
+        reconcileTiles()
+    }
+
+    private fun reconcileTiles() {
+        val r = room ?: return
+        val live = buildSet {
+            participantKey(r.localParticipant).takeIf { it.isNotBlank() }?.let { add(it) }
+            r.remoteParticipants.values.forEach { p ->
+                participantKey(p).takeIf { it.isNotBlank() }?.let { add(it) }
+            }
+        }
+        if (live.isEmpty()) return
+        val current = _uiState.value.tiles
+        val next = current.filter { it.identity in live }
+        if (next.size != current.size) {
+            _uiState.value = _uiState.value.copy(tiles = next)
+        }
     }
 
     private fun removeTile(identity: String) {
@@ -347,8 +389,16 @@ class GalleryViewModel @Inject constructor(
                     // its own .events property is the SharedFlow to collect.
                     r.events.events.collect { event ->
                         when (event) {
-                            is RoomEvent.ParticipantConnected -> upsertTile(event.participant, false)
-                            is RoomEvent.ParticipantDisconnected -> removeTile(event.participant.identity?.value ?: "")
+                            is RoomEvent.ParticipantConnected -> {
+                                departed.remove(participantKey(event.participant))
+                                upsertTile(event.participant, false)
+                            }
+                            is RoomEvent.ParticipantDisconnected -> {
+                                val key = participantKey(event.participant)
+                                if (key.isNotBlank()) departed.add(key)
+                                removeTile(key)
+                                reconcileTiles()
+                            }
                             is RoomEvent.TrackSubscribed -> upsertTile(event.participant, false)
                             is RoomEvent.TrackMuted -> refreshParticipant(event.participant)
                             is RoomEvent.TrackUnmuted -> refreshParticipant(event.participant)
@@ -442,9 +492,13 @@ class GalleryViewModel @Inject constructor(
     }
 
     fun leave() {
+        val id = currentConferenceId
+        val parent = parentConferenceId
         room?.disconnect()
         room?.release()
         room = null
+        if (id > 0) notifyConferenceLeft(sessionManager, apiService, id)
+        if (parent > 0 && parent != id) notifyConferenceLeft(sessionManager, apiService, parent)
     }
 
     override fun onCleared() {

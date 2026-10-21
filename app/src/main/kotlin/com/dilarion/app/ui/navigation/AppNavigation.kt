@@ -90,6 +90,10 @@ fun AppNavigation(pendingIncomingCall: IncomingCallData? = null) {
         val confId = conferenceUpgrade ?: return@LaunchedEffect
         overlayVm.clearConferenceUpgrade()
         overlayVm.clearMinimized()
+        overlayVm.clear()
+        // Drop the 1:1 call screen so its "ended" state can't sit under the
+        // group room or pop the user out of it.
+        navController.popBackStack(Screen.Call.route, inclusive = true)
         navController.navigate(Screen.Gallery.route(confId))
     }
 

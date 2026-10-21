@@ -189,6 +189,15 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [conferenceId, setConferenceId] = useState<number | null>(null);
+  // State lags the click that creates the conference. The ref is what hangup
+  // and the unmount cleanup read, so leaving actually tells the server.
+  const conferenceIdRef = useRef<number | null>(null);
+  conferenceIdRef.current = conferenceId ?? conferenceIdRef.current;
+  // Set while handing a 1:1 call off to the group room. Closing the mesh
+  // peer connection fires "closed", which would otherwise hang the call up
+  // and leave the conference — that is the call ending the moment a third
+  // person is added.
+  const upgradingRef = useRef(false);
   const [confParticipants, setConfParticipants] = useState<string[]>([]);
   const [userPickerOpen, setUserPickerOpen] = useState(false);
   const [userSearch, setUserSearch] = useState('');
@@ -282,6 +291,7 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
           handleEnd();
         }
       } else if (pc.connectionState === 'closed') {
+        if (upgradingRef.current) return;
         handleEnd();
       }
     };
@@ -663,10 +673,11 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
 
   async function handleAddParticipant(username: string) {
     if (!username.trim() || !callIdRef.current) return;
-    let confId = conferenceId;
+    let confId = conferenceIdRef.current;
     if (!confId) {
       const res = await createConference(token, callIdRef.current);
       confId = res.conference_id;
+      conferenceIdRef.current = confId;
       setConferenceId(confId);
       setConfParticipants([partner]);
     }
@@ -678,10 +689,15 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     // group call renders video and a per-participant grid). Staying on the 1:1
     // mesh here would leave them on a different transport from us — audio-only
     // at best, with no way to turn a camera on. Move everyone into the room.
+    // Do not mark this call "ended": that state closes the window on its own,
+    // and stopAllMedia would also leave the conference we just created.
     if (onUpgradeToGallery && confId) {
+      upgradingRef.current = true;
       const id = confId;
       if (callIdRef.current) performCallAction(token, callIdRef.current, 'end').catch(() => {});
-      finishCall();
+      if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
+      if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+      stopAllMedia();
       onUpgradeToGallery(id);
     }
   }
@@ -701,7 +717,14 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     confPeersRef.current.clear();
     confAudioElemsRef.current.forEach(audio => { audio.srcObject = null; audio.remove(); });
     confAudioElemsRef.current.clear();
-    if (conferenceId) conferenceLeave(token, conferenceId).catch(() => {});
+    // Upgrading into the group room must not resign from that room.
+    // Reading the ref (not React state) so a hangup from the first render's
+    // cleanup still sees a conference id stored later.
+    if (!upgradingRef.current && conferenceIdRef.current) {
+      const leaving = conferenceIdRef.current;
+      conferenceIdRef.current = null;
+      conferenceLeave(token, leaving).catch(() => {});
+    }
     pcRef.current?.close();
     pcRef.current = null;
   }
@@ -747,6 +770,7 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
   }
 
   function handleEnd() {
+    if (upgradingRef.current) return;
     if (callIdRef.current) {
       performCallAction(token, callIdRef.current, 'end').catch(() => {});
     }

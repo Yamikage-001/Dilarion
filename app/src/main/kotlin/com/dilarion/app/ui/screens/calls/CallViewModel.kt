@@ -2,6 +2,7 @@ package com.dilarion.app.ui.screens.calls
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.dilarion.app.calls.notifyConferenceLeft
 import com.dilarion.app.data.api.ApiService
 import com.dilarion.app.data.model.CallActionRequest
 import com.dilarion.app.data.model.CallInitiateRequest
@@ -285,8 +286,10 @@ class CallViewModel @Inject constructor(
     fun endCall() {
         NotificationHelper.stopRingtone()
         val callId = _uiState.value.callId
+        val confId = _conferenceState.value.conferenceId
         teardownMedia()
         _uiState.value = _uiState.value.copy(state = CallState.ENDED, endedByMe = true)
+        if (confId != null) notifyConferenceLeft(sessionManager, apiService, confId)
         if (callId == null) return
         viewModelScope.launch {
             val token = sessionManager.sessionToken.first() ?: return@launch
@@ -463,13 +466,18 @@ class CallViewModel @Inject constructor(
                             "calling" -> _uiState.value = _uiState.value.copy(state = CallState.RINGING)
                             "ringing" -> _uiState.value = _uiState.value.copy(state = CallState.RINGING)
                             in CALL_TERMINAL_STATUSES -> {
+                                // The 1:1 leg is closed on purpose when the call
+                                // moves into the group room. That is not a hangup.
+                                if (_conferenceUpgrade.value != null) return@collect
                                 // Remote hung up — kill our side of the media too,
                                 // otherwise both peers keep hearing each other.
                                 // "missed" belongs here: it is what the server
                                 // reports when the caller gives up mid-ring, and
                                 // leaving it out kept this side ringing after.
                                 NotificationHelper.stopRingtone()
+                                val confId = _conferenceState.value.conferenceId
                                 teardownMedia()
+                                if (confId != null) notifyConferenceLeft(sessionManager, apiService, confId)
                                 _uiState.value = _uiState.value.copy(state = CallState.ENDED)
                             }
                         }
@@ -844,12 +852,9 @@ class CallViewModel @Inject constructor(
 
     fun leaveConference() {
         val confId = _conferenceState.value.conferenceId ?: return
-        viewModelScope.launch {
-            val token = sessionManager.sessionToken.first() ?: return@launch
-            runCatching { apiService.conferenceLeave("Bearer $token", confId) }
-            webRtcManager.closeConference()
-            _conferenceState.value = ConferenceUiState()
-        }
+        webRtcManager.closeConference()
+        _conferenceState.value = ConferenceUiState()
+        notifyConferenceLeft(sessionManager, apiService, confId)
     }
 
     private suspend fun sendConferenceSignal(token: String, confId: Int, to: String, signalType: String, data: Any) {

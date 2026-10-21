@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Room, RoomEvent, Track, Participant } from 'livekit-client';
 import { getLiveKitToken, getIceServers, conferenceLeave } from '../services/api';
+import { presenceService } from '../services/presence';
 
 // WhatsApp-style group call — deliberately NOT the meeting UI (GalleryView):
 // no recording, breakout rooms, whiteboard, reactions, waiting room or
@@ -126,6 +127,26 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
   const [now, setNow] = useState(Date.now());
   const everHadOthersRef = useRef(false);
   const endedRef = useRef(false);
+  // Usernames who already left. LiveKit can take a moment to drop them; until
+  // it does the tile stays up and they still look like they're on the call.
+  const [gone, setGone] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const onMsg = (msg: { type: string; data?: Record<string, any> }) => {
+      if (msg.type !== 'conference_participant_left') return;
+      const data = msg.data || {};
+      if (Number(data.conference_id) !== info.conference_id) return;
+      const who = data.username as string | undefined;
+      if (!who) return;
+      setGone(prev => {
+        const next = new Set(prev);
+        next.add(who);
+        return next;
+      });
+    };
+    presenceService.addListener(onMsg);
+    return () => presenceService.removeListener(onMsg);
+  }, [info.conference_id]);
 
   function bump() { setVersion(v => v + 1); }
 
@@ -236,6 +257,7 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
   const room = roomRef.current;
   const participants: { p: Participant; isLocal: boolean }[] = room
     ? [{ p: room.localParticipant as Participant, isLocal: true }, ...Array.from(room.remoteParticipants.values()).map(p => ({ p: p as Participant, isLocal: false }))]
+        .filter(({ p }) => !gone.has(p.identity))
     : [];
   const count = participants.length;
   const cols = count <= 1 ? 1 : count <= 4 ? 2 : count <= 9 ? 3 : 4;

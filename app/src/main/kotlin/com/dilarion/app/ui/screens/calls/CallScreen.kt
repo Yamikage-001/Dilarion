@@ -340,6 +340,36 @@ private fun VideoCallContent(
     eglBaseContext: EglBase.Context,
     onMinimize: ((callId: Int?) -> Unit)? = null,
 ) {
+    val conferenceVideos by viewModel.conferenceRemoteVideos.collectAsState()
+    val conference by viewModel.conferenceState.collectAsState()
+    val remotes = remember(uiState.peerUsername, remoteVideo, conferenceVideos, conference.participants) {
+        buildList {
+            if (uiState.peerUsername.isNotBlank() || remoteVideo != null) {
+                add(uiState.peerUsername.ifBlank { "Guest" } to remoteVideo)
+            }
+            conference.participants.forEach { name ->
+                if (name.isNotBlank() && none { it.first == name }) add(name to conferenceVideos[name])
+            }
+            conferenceVideos.forEach { (name, track) ->
+                if (name.isNotBlank() && none { it.first == name }) add(name to track)
+            }
+        }
+    }
+    // Three or more people: one full-screen feed plus a self thumbnail hides
+    // whoever isn't the original pair. Show every face instead.
+    if (remotes.size >= 2) {
+        Column(Modifier.fillMaxSize().background(Color.Black)) {
+            Box(Modifier.weight(1f).fillMaxWidth().padding(8.dp)) {
+                val slots = listOf("You" to localVideo) + remotes
+                VideoSlotGrid(slots, eglBaseContext, Modifier.fillMaxSize())
+            }
+            Box(Modifier.padding(bottom = 28.dp)) {
+                CallControls(uiState, viewModel, showFlip = false, onMinimize = null)
+            }
+        }
+        return
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         // Remote video full-screen
         if (remoteVideo != null) {
@@ -385,6 +415,59 @@ private fun VideoCallContent(
         // Controls bottom
         Box(modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp)) {
             CallControls(uiState, viewModel, showFlip = false, onMinimize = null)
+        }
+    }
+}
+
+@Composable
+private fun VideoSlotGrid(
+    slots: List<Pair<String, VideoTrack?>>,
+    eglBaseContext: EglBase.Context,
+    modifier: Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        slots.chunked(2).forEach { row ->
+            Row(
+                Modifier.weight(1f).fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                row.forEach { (name, track) ->
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF1A1A22)),
+                    ) {
+                        if (track != null) {
+                            VideoView(
+                                videoTrack = track,
+                                eglBaseContext = eglBaseContext,
+                                modifier = Modifier.fillMaxSize(),
+                                mirror = name == "You",
+                            )
+                        } else {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text(
+                                    name.take(1).uppercase(),
+                                    color = SurfaceWhite,
+                                    fontSize = 28.sp,
+                                    fontWeight = FontWeight.Bold,
+                                )
+                            }
+                        }
+                        Text(
+                            name,
+                            color = SurfaceWhite,
+                            fontSize = 12.sp,
+                            modifier = Modifier.align(Alignment.BottomStart).padding(8.dp)
+                                .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
         }
     }
 }

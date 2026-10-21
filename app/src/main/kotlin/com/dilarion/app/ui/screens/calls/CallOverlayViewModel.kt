@@ -87,6 +87,13 @@ class CallOverlayViewModel @Inject constructor(
     private val _conferenceUpgrade = MutableStateFlow<Int?>(null)
     val conferenceUpgrade: StateFlow<Int?> = _conferenceUpgrade
 
+    /**
+     * 1:1 call ids that were turned into a group call. The server then reports
+     * the mesh leg as "end", which is not a missed call and must not tear the
+     * group call down.
+     */
+    private val upgradedCallIds = mutableSetOf<Int>()
+
     private var durationJob: Job? = null
 
     init {
@@ -128,6 +135,7 @@ class CallOverlayViewModel @Inject constructor(
                         val status = data.get("status")?.asString ?: return@collect
                         if (status !in CALL_TERMINAL_STATUSES) return@collect
                         val callId = data.get("call_id")?.asInt
+                        if (callId != null && callId in upgradedCallIds) return@collect
                         val ringing = _incomingCall.value
                         if (ringing != null && (callId == null || callId == ringing.callId)) {
                             NotificationHelper.stopRingtone()
@@ -141,6 +149,12 @@ class CallOverlayViewModel @Inject constructor(
                     // party has to follow it there or they sit on a dead leg.
                     "conference_upgraded" -> {
                         val confId = data.get("conference_id")?.asInt ?: return@collect
+                        data.get("call_id")?.takeIf { !it.isJsonNull }?.asInt?.let { upgradedCallIds.add(it) }
+                        // The incoming-call overlay covers the whole app. Leave it
+                        // up and the group room we navigate to is never visible,
+                        // so the call looks like it died on two tiles.
+                        NotificationHelper.stopRingtone()
+                        _incomingCall.value = null
                         _conferenceUpgrade.value = confId
                     }
                     // Being added to a live call rings like any other call: the

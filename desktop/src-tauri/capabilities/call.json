@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "core:event:default",
+    "core:event:allow-emit-to",
     {
       "identifier": "http:default",
       "allow": [

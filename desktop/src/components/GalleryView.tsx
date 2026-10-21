@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Room, RoomEvent, Track, RemoteParticipant, TrackPublication, Participant } from 'livekit-client';
 import { CloseIcon as SharedCloseIcon } from './Icons';
 import {
-  getLiveKitToken, getIceServers, getUsers, conferenceInvite as apiConferenceInvite, Contact,
+  getLiveKitToken, getIceServers, getUsers, conferenceInvite as apiConferenceInvite, conferenceLeave, Contact,
   getWaitingRoom, admitFromWaitingRoom, denyFromWaitingRoom, WaitingParticipant,
   muteConferenceParticipant, getMyOrgPrivileges,
   startConferenceRecording, stopConferenceRecording,
@@ -214,7 +214,10 @@ export default function GalleryView({
 
         room
           .on(RoomEvent.ParticipantConnected, (p: RemoteParticipant) => upsertTile(p, false))
-          .on(RoomEvent.ParticipantDisconnected, (p: RemoteParticipant) => removeTile(p.identity))
+          .on(RoomEvent.ParticipantDisconnected, (p: RemoteParticipant) => {
+            removeTile(p.identity);
+            removeScreenTile(p.identity);
+          })
           .on(RoomEvent.ActiveSpeakersChanged, speakers => {
             const speaking = new Set(speakers.map(s => s.identity));
             setTiles(prev => {
@@ -322,6 +325,17 @@ export default function GalleryView({
         const data = msg.data || {};
         if (data.conference_id !== conferenceId) return;
         setWaiting(prev => (prev.some(w => w.user_id === data.user_id) ? prev : [...prev, { user_id: data.user_id, username: data.username }]));
+      } else if (msg.type === 'conference_participant_left') {
+        const data = msg.data || {};
+        if (data.conference_id !== conferenceId && data.conference_id !== activeConferenceId) return;
+        const who = data.username as string | undefined;
+        if (!who) return;
+        setTiles(prev => {
+          const next = { ...prev };
+          delete next[who];
+          delete next[who + SCREEN_SHARE_SUFFIX];
+          return next;
+        });
       } else if (msg.type === 'conference_force_mute') {
         const data = msg.data || {};
         if (data.conference_id !== conferenceId && data.conference_id !== activeConferenceId) return;
@@ -621,7 +635,10 @@ export default function GalleryView({
   }
 
   function leave() {
+    const ids = Array.from(new Set([activeConferenceId, conferenceId].filter(Boolean)));
     roomRef.current?.disconnect();
+    roomRef.current = null;
+    ids.forEach(id => conferenceLeave(token, id).catch(() => {}));
     onClose();
   }
 
