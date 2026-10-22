@@ -856,6 +856,23 @@ export interface LiveKitTokenResponse {
   room: string;
 }
 
+/** Normalize server configuration for LiveKit clients. The SDK appends its
+ * own `/rtc` signalling endpoint, so LIVEKIT_URL must be the origin, not a
+ * URL ending in `/rtc`. Accepting http(s) here also avoids handing the SDK a
+ * non-WebSocket scheme when a server was configured with its HTTPS origin. */
+function normalizeLiveKitUrl(rawUrl: string): string {
+  const parsed = new URL(rawUrl.trim());
+  if (parsed.protocol === 'https:') parsed.protocol = 'wss:';
+  else if (parsed.protocol === 'http:') parsed.protocol = 'ws:';
+  if (parsed.protocol !== 'wss:' && parsed.protocol !== 'ws:') {
+    throw new Error('LiveKit server returned an unsupported connection URL');
+  }
+  if (parsed.pathname.replace(/\/+$/, '') === '/rtc') parsed.pathname = '';
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString().replace(/\/$/, '');
+}
+
 export async function getLiveKitToken(token: string, conferenceId: number, displayName?: string): Promise<LiveKitTokenResponse> {
   const qs = displayName?.trim() ? `?display_name=${encodeURIComponent(displayName.trim())}` : '';
   const res = await apiFetch(`${BASE}/calls/conference/${conferenceId}/livekit-token${qs}`, {
@@ -868,7 +885,8 @@ export async function getLiveKitToken(token: string, conferenceId: number, displ
     err.status = res.status;
     throw err;
   }
-  return res.json();
+  const body = await res.json() as LiveKitTokenResponse;
+  return { ...body, url: normalizeLiveKitUrl(body.url) };
 }
 
 // ── Scheduled meetings ───────────────────────────────────────────────────────
