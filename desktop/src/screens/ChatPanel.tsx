@@ -498,7 +498,6 @@ interface MessageBubbleProps {
   masterToken: string | null;
   onDecrypt: (masterToken: string, messageId: number) => Promise<string>;
   onMasterTokenSaved: (t: string) => void;
-  onRemoveMessage: (id: number) => void;
   onJoinMeeting: JoinMeetingHandler;
   replyToMsg?: ChatMessage | null;
   onReact: (emoji: string) => void;
@@ -513,7 +512,7 @@ interface MessageBubbleProps {
 }
 
 function MessageBubble({
-  msg, isMine, token, masterToken, onDecrypt, onMasterTokenSaved, onRemoveMessage, onJoinMeeting,
+  msg, isMine, token, masterToken, onDecrypt, onMasterTokenSaved, onJoinMeeting,
   replyToMsg, onReact, onReply, onForward, onPinToggle, onStarToggle, onEdit, onDelete, onTranslate, isStarred,
 }: MessageBubbleProps) {
   const ct = msg.content_type;
@@ -580,7 +579,6 @@ function MessageBubble({
         mediaId={mediaId}
         masterToken={masterToken}
         onMasterTokenSaved={onMasterTokenSaved}
-        onRemove={() => onRemoveMessage(msg.id)}
       />
     );
   } else if (isVoice(ct)) {
@@ -594,7 +592,6 @@ function MessageBubble({
         contentType={ct}
         masterToken={masterToken}
         onMasterTokenSaved={onMasterTokenSaved}
-        onRemove={() => onRemoveMessage(msg.id)}
         isMine={isMine}
         sender={msg.sender || '?'}
       />
@@ -609,7 +606,6 @@ function MessageBubble({
         contentType={ct}
         masterToken={masterToken}
         onMasterTokenSaved={onMasterTokenSaved}
-        onRemove={() => onRemoveMessage(msg.id)}
       />
     );
   } else {
@@ -1360,7 +1356,6 @@ export default function ChatPanel({
                     masterToken={masterToken}
                     onDecrypt={handleDecrypt}
                     onMasterTokenSaved={onMasterTokenSaved}
-                    onRemoveMessage={id => setMessages(prev => prev.filter(m => m.id !== id))}
                     onJoinMeeting={onJoinMeeting}
                     replyToMsg={msg.reply_to_message_id ? messages.find(m => m.id === msg.reply_to_message_id) ?? null : null}
                     onReact={emoji => handleReact(msg.id, emoji)}

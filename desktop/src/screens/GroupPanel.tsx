@@ -341,14 +341,13 @@ interface GroupMsgBubbleProps {
   onEdit: () => void;
   onDelete: () => void;
   onTranslate: (text: string) => void;
-  onRemoveMessage: (id: number) => void;
   isStarred: boolean;
 }
 
 function GroupMsgBubble({
   msg, isMine, myUsername, token, masterToken, onDecrypt, onMasterTokenSaved, onJoinMeeting,
   replyToMsg, onReact, onReply, onForward, onPinToggle, onStarToggle, onEdit, onDelete, onTranslate,
-  onRemoveMessage, isStarred,
+  isStarred,
 }: GroupMsgBubbleProps) {
   const ct = msg.content_type;
   const mediaId = msg.content;
@@ -418,7 +417,6 @@ function GroupMsgBubble({
         mediaId={mediaId}
         masterToken={masterToken}
         onMasterTokenSaved={onMasterTokenSaved}
-        onRemove={() => onRemoveMessage(msg.id)}
       />
     );
   } else if (isVoice(ct)) {
@@ -431,7 +429,6 @@ function GroupMsgBubble({
         contentType={ct}
         masterToken={masterToken}
         onMasterTokenSaved={onMasterTokenSaved}
-        onRemove={() => onRemoveMessage(msg.id)}
         isMine={isMine}
         sender={msg.sender || '?'}
       />
@@ -446,7 +443,6 @@ function GroupMsgBubble({
         contentType={ct}
         masterToken={masterToken}
         onMasterTokenSaved={onMasterTokenSaved}
-        onRemove={() => onRemoveMessage(msg.id)}
       />
     );
   } else {
@@ -1130,7 +1126,6 @@ export default function GroupPanel({ token, myUsername, group, masterToken, onMa
                 onEdit={() => handleEditStart(msg)}
                 onDelete={() => handleDeleteMessage(msg)}
                 onTranslate={t => handleTranslateMessage(t)}
-                onRemoveMessage={id => setMessages(prev => prev.filter(m => m.id !== id))}
                 isStarred={starredIds.has(msg.id)}
               />
             );

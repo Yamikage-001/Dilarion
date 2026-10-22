@@ -136,7 +136,7 @@ function MediaLightbox({ src, kind, onClose }: { src: string; kind: MediaKind; o
           />
         )}
         <span style={{ fontSize: '0.72rem', color: 'rgba(255,255,255,0.5)' }}>
-          View once — this closes and clears when you dismiss it
+          Secure media — close to return to chat
         </span>
       </div>
     </div>,
@@ -217,8 +217,8 @@ function extractWaveform(buf: ArrayBuffer, bucketCount = 40): Promise<{ bars: nu
  * lock icon is gated. Sender and receiver go through the exact same path,
  * no isMine bypass.
  */
-function VoiceBubble({ token, mediaId, masterToken, onMasterTokenSaved, onRemove, isMine, sender }: {
-  token: string; mediaId: string; masterToken: string | null; onMasterTokenSaved: (t: string) => void; onRemove?: () => void; isMine: boolean; sender: string;
+function VoiceBubble({ token, mediaId, masterToken, onMasterTokenSaved, isMine, sender }: {
+  token: string; mediaId: string; masterToken: string | null; onMasterTokenSaved: (t: string) => void; isMine: boolean; sender: string;
 }) {
   const [stage, setStage] = useState<VoiceStage>('loading');
   const [voiceUrl, setVoiceUrl] = useState<string | null>(null);
@@ -331,7 +331,6 @@ function VoiceBubble({ token, mediaId, masterToken, onMasterTokenSaved, onRemove
       setTokenInputVisible(false);
       setTokenValue('');
       setRevealing(false);
-      if (onRemove) setTimeout(onRemove, 10_000);
     } catch (err: any) {
       setRevealing(false);
       // 410/404: the real file is already gone server-side. The decoy stays
@@ -521,17 +520,15 @@ function VoiceBubble({ token, mediaId, masterToken, onMasterTokenSaved, onRemove
 }
 
 /**
- * View-once media bubble for images/video (and any other non-voice, non-
+ * Secure media bubble for images/video (and any other non-voice, non-
  * document attachment). Downloads on tap, classifies by magic bytes, and
- * shows photos/videos in a full-screen lightbox. `onRemove` (when provided)
- * fires 10s after the media is dismissed, matching the server's one-time-view
- * deletion. Gating against the master token happens in the caller (see
+ * shows photos/videos in a full-screen lightbox. Gating against the master token happens in the caller (see
  * ChatPanel/GroupPanel's LockedContent wrapper) — this component only ever
  * mounts once that's already been satisfied. Voice notes are routed to
  * VoiceBubble above instead, which self-gates (decoy-first, no wrapper).
  */
-export default function MediaBubble({ token, mediaId, contentType, masterToken, onMasterTokenSaved, onRemove, isMine, sender }: {
-  token: string; mediaId: string; contentType: string; masterToken?: string | null; onMasterTokenSaved?: (t: string) => void; onRemove?: () => void; isMine?: boolean; sender?: string;
+export default function MediaBubble({ token, mediaId, contentType, masterToken, onMasterTokenSaved, isMine, sender }: {
+  token: string; mediaId: string; contentType: string; masterToken?: string | null; onMasterTokenSaved?: (t: string) => void; isMine?: boolean; sender?: string;
 }) {
   if (isVoice(contentType)) {
     return (
@@ -540,7 +537,6 @@ export default function MediaBubble({ token, mediaId, contentType, masterToken, 
         mediaId={mediaId}
         masterToken={masterToken ?? null}
         onMasterTokenSaved={onMasterTokenSaved ?? (() => {})}
-        onRemove={onRemove}
         isMine={isMine ?? false}
         sender={sender ?? '?'}
       />
@@ -553,7 +549,6 @@ export default function MediaBubble({ token, mediaId, contentType, masterToken, 
       contentType={contentType}
       masterToken={masterToken ?? null}
       onMasterTokenSaved={onMasterTokenSaved ?? (() => {})}
-      onRemove={onRemove}
     />
   );
 }
@@ -600,10 +595,10 @@ function getDecoyImageUrl(token: string, mediaId: string): Promise<string> {
 // renders as an image even for a video attachment; the reveal produces the
 // real playable video.
 function VisualMediaBubble({
-  token, mediaId, contentType, masterToken, onMasterTokenSaved, onRemove,
+  token, mediaId, contentType, masterToken, onMasterTokenSaved,
 }: {
   token: string; mediaId: string; contentType: string;
-  masterToken: string | null; onMasterTokenSaved: (t: string) => void; onRemove?: () => void;
+  masterToken: string | null; onMasterTokenSaved: (t: string) => void;
 }) {
   const cachedDecoy = decoyImageCache.get(mediaId) ?? null;
   const [stage, setStage] = useState<VisStage>(cachedDecoy ? 'decoy' : 'loading');
@@ -614,29 +609,17 @@ function VisualMediaBubble({
   const [tokenValue, setTokenValue] = useState('');
   const [viewerOpen, setViewerOpen] = useState(false);
   const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const removeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isVideoAttachment = isVideoCt(contentType);
 
   useEffect(() => {
     return () => {
-      if (removeTimerRef.current) clearTimeout(removeTimerRef.current);
       if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
     };
   }, []);
 
-  function scheduleRemoval() {
-    if (!onRemove) return;
-    if (removeTimerRef.current) clearTimeout(removeTimerRef.current);
-    removeTimerRef.current = setTimeout(() => onRemove(), 10_000);
-  }
-
   function closeViewer() {
-    const wasRevealed = stage === 'revealed';
     setViewerOpen(false);
-    // Decoy views are unlimited (nothing to burn); only a real reveal counts
-    // toward the one-time-view removal, and only once actually dismissed.
-    if (wasRevealed) scheduleRemoval();
   }
 
   // Decoy loads by itself as soon as the bubble mounts (cached after the
@@ -834,13 +817,11 @@ export function DocumentBubble({
   mediaId,
   masterToken,
   onMasterTokenSaved,
-  onRemove,
 }: {
   token: string;
   mediaId: string;
   masterToken: string | null;
   onMasterTokenSaved: (t: string) => void;
-  onRemove?: () => void;
 }) {
   const [stage, setStage] = useState<DocStage>('idle');
   const [error, setError] = useState<string | null>(null);
@@ -856,16 +837,9 @@ export function DocumentBubble({
   }, []);
 
   function closeViewer() {
-    // Drop it from memory on close — reopening re-fetches rather than keeping
-    // decoded bytes sitting around. For the real file this also means it can't
-    // be viewed again without the server round-trip, which will 410 anyway
-    // since the server already deleted it after this one read.
-    const wasRevealed = stage === 'revealed';
+    // Drop decoded document bytes from memory on close. The encrypted source
+    // remains on the server and can be fetched again when reopened.
     setViewerUrl(null);
-    // Only remove the message once the user has actually seen the real file and
-    // dismissed it — calling this from reveal() itself would unmount the bubble
-    // (and its just-opened viewer) before anything ever painted.
-    if (wasRevealed) onRemove?.();
   }
 
   // Also used to reopen the decoy after the viewer's been closed once — nothing
