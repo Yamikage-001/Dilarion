@@ -18,6 +18,8 @@ import {
   starMessage,
   unstarMessage,
   getStarredMessages,
+  getUsers,
+  Contact,
 } from '../services/api';
 import { encryptMessage } from '../services/crypto';
 import { generateDecoy } from '../services/decoy';
@@ -701,6 +703,7 @@ function MessageBubble({
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginTop: 3, justifyContent: isMine ? 'flex-end' : 'flex-start' }}>
         {msg.is_pinned && <span title="Pinned" style={{ display: 'inline-flex' }}><PinIcon size={11} color={isMine ? 'rgba(255,255,255,0.75)' : '#6b7280'} /></span>}
+        {isStarred && <span title="Starred" style={{ display: 'inline-flex', color: '#f59e0b', fontSize: '0.72rem', lineHeight: 1 }}>★</span>}
         {msg.is_edited && <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>edited</span>}
         <span style={ms.ts}>{fmtTime(msg.timestamp)}</span>
         {isMine && <MsgStatusIcon delivered={msg.delivered} read={msg.read} />}
@@ -795,6 +798,16 @@ export default function ChatPanel({
   const [forwardTarget, setForwardTarget] = useState<ChatMessage | null>(null);
   const [forwardUsername, setForwardUsername] = useState('');
   const [forwardError, setForwardError] = useState<string | null>(null);
+  const [forwardContacts, setForwardContacts] = useState<Contact[]>([]);
+  const [forwardPicked, setForwardPicked] = useState(false); // true once a suggestion is chosen
+
+  // Load the contact list the first time a forward dialog opens, for the
+  // recipient suggestion dropdown.
+  useEffect(() => {
+    if (forwardTarget && forwardContacts.length === 0) {
+      getUsers(token).then(list => setForwardContacts(list.filter(c => c.username !== myUsername))).catch(() => {});
+    }
+  }, [forwardTarget]);
 
   const [copilotResult, setCopilotResult] = useState<{ title: string; loading: boolean; error: string | null; content: string | null } | null>(null);
   const [tokenGateOpen, setTokenGateOpen] = useState(false);
@@ -1189,8 +1202,9 @@ export default function ChatPanel({
     try {
       await uploadMedia(token, partner, file, ct, file.name);
       await loadConversation();
-    } catch {
-      // silently fail
+    } catch (err: any) {
+      // Surface the failure instead of letting the bubble silently vanish.
+      setSendError(err?.message || 'Failed to send file');
     } finally {
       setPending(prev => prev.filter(p => p.localId !== localId));
     }
@@ -1206,8 +1220,10 @@ export default function ChatPanel({
     try {
       await uploadMedia(token, partner, file, ct, file.name, kind);
       await loadConversation();
-    } catch {
-      // silently fail
+    } catch (err: any) {
+      // Previously swallowed — a failed document upload just disappeared with no
+      // explanation. Show why so it's actionable.
+      setSendError(err?.message || 'Failed to send document');
     } finally {
       setPending(prev => prev.filter(p => p.localId !== localId));
     }
@@ -1360,7 +1376,7 @@ export default function ChatPanel({
                     replyToMsg={msg.reply_to_message_id ? messages.find(m => m.id === msg.reply_to_message_id) ?? null : null}
                     onReact={emoji => handleReact(msg.id, emoji)}
                     onReply={() => { setReplyTarget(msg); setEditingMessage(null); }}
-                    onForward={() => { setForwardTarget(msg); setForwardUsername(''); setForwardError(null); }}
+                    onForward={() => { setForwardTarget(msg); setForwardUsername(''); setForwardError(null); setForwardPicked(false); }}
                     onPinToggle={() => handlePinToggle(msg)}
                     onStarToggle={() => handleStarToggle(msg)}
                     isStarred={starredIds.has(msg.id)}
@@ -1489,13 +1505,36 @@ export default function ChatPanel({
         <div className="responsive-overlay" style={{ position: 'fixed', inset: 0, zIndex: 900, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div className="responsive-dialog" style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-color)', borderRadius: 12, padding: 20, width: 320 }}>
             <h3 style={{ margin: 0, marginBottom: 12, fontSize: '0.95rem' }}>Forward message</h3>
-            <input
-              autoFocus
-              value={forwardUsername}
-              onChange={e => setForwardUsername(e.target.value)}
-              placeholder="Recipient username"
-              style={{ width: '100%', background: 'var(--input-field-bg)', border: '1px solid var(--border-color)', borderRadius: 8, color: 'var(--text-primary)', fontSize: '0.85rem', padding: '8px 10px', marginBottom: 10 }}
-            />
+            <div style={{ position: 'relative', marginBottom: 10 }}>
+              <input
+                autoFocus
+                value={forwardUsername}
+                onChange={e => { setForwardUsername(e.target.value); setForwardPicked(false); }}
+                placeholder="Search a contact…"
+                style={{ width: '100%', boxSizing: 'border-box', background: 'var(--input-field-bg)', border: '1px solid var(--border-color)', borderRadius: 8, color: 'var(--text-primary)', fontSize: '0.85rem', padding: '8px 10px' }}
+              />
+              {!forwardPicked && forwardUsername.trim() && (() => {
+                const q = forwardUsername.trim().toLowerCase();
+                const matches = forwardContacts.filter(c => c.username.toLowerCase().includes(q)).slice(0, 6);
+                if (matches.length === 0) return null;
+                return (
+                  <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: 4, background: 'var(--bg-panel)', border: '1px solid var(--border-color)', borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', zIndex: 5, maxHeight: 180, overflowY: 'auto' }}>
+                    {matches.map(c => (
+                      <button
+                        key={c.username}
+                        onClick={() => { setForwardUsername(c.username); setForwardPicked(true); }}
+                        style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left', background: 'transparent', border: 'none', padding: '8px 10px', cursor: 'pointer', fontSize: '0.82rem', color: 'var(--text-primary)' }}
+                        onMouseEnter={ev => (ev.currentTarget.style.background = 'var(--bg-hover, rgba(255,255,255,0.06))')}
+                        onMouseLeave={ev => (ev.currentTarget.style.background = 'transparent')}
+                      >
+                        <span style={{ width: 7, height: 7, borderRadius: '50%', background: c.is_active ? '#25d366' : '#9ca3af' }} />
+                        {c.username}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
             {forwardError && <p style={{ color: '#ef4444', fontSize: '0.75rem', marginBottom: 10 }}>{forwardError}</p>}
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
               <button onClick={() => setForwardTarget(null)} style={{ background: 'transparent', border: '1px solid var(--border-color)', borderRadius: 8, color: 'var(--text-primary)', padding: '7px 14px', cursor: 'pointer', fontSize: '0.8rem' }}>Cancel</button>
@@ -1510,7 +1549,7 @@ export default function ChatPanel({
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*,video/*,application/pdf"
+          accept="image/*,video/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
           style={{ display: 'none' }}
           onChange={handleFileChange}
         />

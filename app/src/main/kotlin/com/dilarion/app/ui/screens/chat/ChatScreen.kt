@@ -1911,6 +1911,7 @@ private fun MessageBubble(
                         horizontalArrangement = Arrangement.spacedBy(3.dp),
                     ) {
                         if (message.isPinned) Text("📌", fontSize = 10.sp)
+                        if (isStarred) Text("★", fontSize = 10.sp, color = Color(0xFFF59E0B))
                         if (message.isEdited) {
                             Text("edited", style = MaterialTheme.typography.labelSmall, color = TextSecondary, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
                         }
