@@ -2,6 +2,7 @@ package com.dilarion.app.ui.screens.calls
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.util.Log
 import com.dilarion.app.calls.notifyConferenceLeft
 import com.dilarion.app.data.api.ApiService
 import com.dilarion.app.data.model.CallActionRequest
@@ -15,6 +16,7 @@ import com.dilarion.app.services.PresenceService
 import com.dilarion.app.webrtc.CallSession
 import com.dilarion.app.webrtc.WebRtcManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -93,6 +95,8 @@ class CallViewModel @Inject constructor(
     private var answerPollJob: kotlinx.coroutines.Job? = null
     private var wsObserverJob: kotlinx.coroutines.Job? = null
     private var iceConnectedJob: kotlinx.coroutines.Job? = null
+    private var connectWatchdog: kotlinx.coroutines.Job? = null
+    private val iceLock = Any()
 
     // The only honest "call connected" signal — the PeerConnection's own ICE
     // state, not "the SDP answer arrived" (caller) or "the HTTP accept
@@ -105,6 +109,8 @@ class CallViewModel @Inject constructor(
         iceConnectedJob = viewModelScope.launch {
             webRtcManager.iceConnected.collect { connected ->
                 if (connected && _uiState.value.state != CallState.CONNECTED) {
+                    connectWatchdog?.cancel()
+                    connectWatchdog = null
                     _uiState.value = _uiState.value.copy(state = CallState.CONNECTED)
                     rememberSession()
                     startTimer()
@@ -112,7 +118,7 @@ class CallViewModel @Inject constructor(
             }
         }
     }
-    private var pendingCandidates = mutableListOf<IceCandidate>()
+    private val pendingCandidates = mutableListOf<IceCandidate>()
     private var storedOfferSdp: String? = null
     // Answer kept so a rejected master token can be retried without rebuilding it.
     private var cachedAnswerSdp: String? = null
@@ -127,7 +133,7 @@ class CallViewModel @Inject constructor(
         webRtcManager.closeCall()
         timerJob?.cancel()
         remoteDescSet = false
-        pendingCandidates.clear()
+        clearPendingIce()
         pendingRemoteCandidates.clear()
         storedOfferSdp = null
         cachedAnswerSdp = null
@@ -170,7 +176,7 @@ class CallViewModel @Inject constructor(
         webRtcManager.closeCall()
         timerJob?.cancel()
         remoteDescSet = false
-        pendingCandidates.clear()
+        clearPendingIce()
         pendingRemoteCandidates.clear()
         cachedAnswerSdp = null
         storedOfferSdp = incoming.offerSdp
@@ -254,6 +260,7 @@ class CallViewModel @Inject constructor(
                     )
                 }
                 flushPendingCandidates(token, peerUsername, callId)
+                armConnectWatchdog()
                 // state stays as-is here (not yet CONNECTED) — observeIceConnected()
                 // is the only place that flips it, once ICE actually finishes.
                 // Flipping here on a successful accept response showed "Connected"
@@ -348,6 +355,7 @@ class CallViewModel @Inject constructor(
                             webRtcManager.addIceCandidate(mid, idx, cand)
                         }
                         pendingRemoteCandidates.clear()
+                        armConnectWatchdog()
                         // Not CONNECTED yet — observeIceConnected() flips it once ICE
                         // actually finishes, not as soon as the answer SDP arrives.
                         rememberSession()
@@ -382,14 +390,18 @@ class CallViewModel @Inject constructor(
     }
 
     /** Close the peer connection, stop capture/audio and drop all signaling buffers. */
-    private fun teardownMedia() {
+    private fun teardownMedia(cancelWatchdog: Boolean = true) {
         timerJob?.cancel()
         timerJob = null
         answerPollJob?.cancel()
         answerPollJob = null
+        if (cancelWatchdog) {
+            connectWatchdog?.cancel()
+            connectWatchdog = null
+        }
         webRtcManager.closeCall()
         remoteDescSet = false
-        pendingCandidates.clear()
+        clearPendingIce()
         pendingRemoteCandidates.clear()
         storedOfferSdp = null
         cachedAnswerSdp = null
@@ -458,7 +470,7 @@ class CallViewModel @Inject constructor(
         _conferenceUpgrade.value = null
         remoteDescSet = false
         pendingRemoteCandidates.clear()
-        pendingCandidates.clear()
+        clearPendingIce()
         storedOfferSdp = null
         cachedAnswerSdp = null
     }
@@ -482,6 +494,7 @@ class CallViewModel @Inject constructor(
                                     webRtcManager.addIceCandidate(mid, idx, cand)
                                 }
                                 pendingRemoteCandidates.clear()
+                                armConnectWatchdog()
                                 // Not CONNECTED yet — observeIceConnected() flips it once ICE
                                 // actually finishes, not as soon as the answer SDP arrives.
                                 rememberSession()
@@ -893,44 +906,93 @@ class CallViewModel @Inject constructor(
     private suspend fun sendIceCandidate(peerUsername: String, candidate: IceCandidate) {
         val callId = _uiState.value.callId
         if (callId == null) {
-            pendingCandidates.add(candidate)
+            synchronized(iceLock) { pendingCandidates.add(candidate) }
             return
         }
-        val token = sessionManager.sessionToken.first() ?: return
-        runCatching {
-            apiService.sendIceCandidate(
-                "Bearer $token",
-                IceCandidateRequest(
-                    callId = callId,
-                    recipientUsername = peerUsername,
-                    candidate = mapOf(
-                        "sdpMid" to candidate.sdpMid,
-                        "sdpMLineIndex" to candidate.sdpMLineIndex,
-                        "candidate" to candidate.sdp,
-                    ),
-                ),
-            )
+        val token = sessionManager.sessionToken.first()
+        if (token == null) {
+            Log.w("CallVM", "ICE candidate not sent, no session callId=$callId")
+            synchronized(iceLock) { pendingCandidates.add(candidate) }
+            return
         }
+        deliverIceCandidate(token, callId, peerUsername, candidate)
     }
 
     private suspend fun flushPendingCandidates(token: String, peerUsername: String, callId: Int) {
-        pendingCandidates.forEach { candidate ->
-            runCatching {
-                apiService.sendIceCandidate(
-                    "Bearer $token",
-                    IceCandidateRequest(
-                        callId = callId,
-                        recipientUsername = peerUsername,
-                        candidate = mapOf(
-                            "sdpMid" to candidate.sdpMid,
-                            "sdpMLineIndex" to candidate.sdpMLineIndex,
-                            "candidate" to candidate.sdp,
-                        ),
-                    ),
-                )
+        val batch = synchronized(iceLock) {
+            val snap = pendingCandidates.toList()
+            pendingCandidates.clear()
+            snap
+        }
+        for (candidate in batch) {
+            deliverIceCandidate(token, callId, peerUsername, candidate)
+        }
+    }
+
+    private fun clearPendingIce() {
+        synchronized(iceLock) { pendingCandidates.clear() }
+    }
+
+    /** ICE that has not connected ~15s after the answer is in. One restart,
+     *  then a failure with a retry — a stuck "connecting" used to sit there. */
+    private fun armConnectWatchdog() {
+        connectWatchdog?.cancel()
+        connectWatchdog = viewModelScope.launch {
+            delay(15_000)
+            if (webRtcManager.iceConnected.value || _uiState.value.state == CallState.CONNECTED) return@launch
+            if (_uiState.value.state == CallState.ENDED || _uiState.value.state == CallState.IDLE) return@launch
+            Log.w("CallVM", "ICE not connected after 15s — restarting")
+            webRtcManager.restartIce()
+            delay(10_000)
+            if (webRtcManager.iceConnected.value || _uiState.value.state == CallState.CONNECTED) return@launch
+            if (_uiState.value.state == CallState.ENDED || _uiState.value.state == CallState.IDLE) return@launch
+            Log.w("CallVM", "ICE watchdog giving up")
+            val callId = _uiState.value.callId
+            teardownMedia(cancelWatchdog = false)
+            _uiState.value = _uiState.value.copy(
+                state = CallState.ENDED,
+                endedByMe = false,
+                error = "Couldn't connect. Check your network and try again.",
+            )
+            if (callId != null) {
+                val token = sessionManager.sessionToken.first() ?: return@launch
+                runCatching { apiService.callAction("Bearer $token", CallActionRequest(callId, "end")) }
             }
         }
-        pendingCandidates.clear()
+    }
+
+    private suspend fun deliverIceCandidate(
+        token: String,
+        callId: Int,
+        peerUsername: String,
+        candidate: IceCandidate,
+    ) {
+        val request = IceCandidateRequest(
+            callId = callId,
+            recipientUsername = peerUsername,
+            candidate = mapOf(
+                "sdpMid" to candidate.sdpMid,
+                "sdpMLineIndex" to candidate.sdpMLineIndex,
+                "candidate" to candidate.sdp,
+            ),
+        )
+        var backoff = 250L
+        repeat(3) { attempt ->
+            val result = runCatching {
+                apiService.sendIceCandidate("Bearer $token", request)
+            }
+            val resp = result.getOrNull()
+            if (result.isSuccess && resp?.isSuccessful == true) return
+            Log.w(
+                "CallVM",
+                "ICE candidate send failed attempt=${attempt + 1} callId=$callId " +
+                    "mid=${candidate.sdpMid} err=${result.exceptionOrNull()?.message ?: resp?.code()}",
+            )
+            if (attempt < 2) {
+                delay(backoff)
+                backoff *= 2
+            }
+        }
     }
 
     private fun startTimer() {

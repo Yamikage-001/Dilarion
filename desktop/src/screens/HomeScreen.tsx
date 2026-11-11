@@ -2215,7 +2215,7 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
   // Someone adding us to a call already in progress. Rings and waits for the
   // master token — an invite must not open our microphone on its own.
   const [conferenceInvite, setConferenceInvite] = useState<
-    { conferenceId: number; invitedBy: string; participants: string[]; groupId?: number; groupName?: string; callType?: 'voice' | 'video' } | null
+    { conferenceId: number; invitedBy: string; participants: string[]; groupId?: number; groupName?: string; callType?: 'voice' | 'video'; kind?: string } | null
   >(null);
   const [confTokenInput, setConfTokenInput] = useState('');
   const [confTokenRejected, setConfTokenRejected] = useState(false);
@@ -2225,25 +2225,31 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
     if (!conferenceInvite || !confTokenInput.trim()) return;
     setConfJoining(true);
     try {
-      await conferenceAccept(
+      const accepted = await conferenceAccept(
         token, conferenceInvite.conferenceId, confTokenInput.trim(),
       );
       stopRinging();
-      if (conferenceInvite.groupName) {
+      const kind = accepted.kind || conferenceInvite.kind;
+      const callType = accepted.call_type || conferenceInvite.callType;
+      if (kind === 'group_call' || conferenceInvite.groupName) {
         // Group call (not a meeting): WhatsApp-style call window.
         openGroupCallWindow({
           conference_id: conferenceInvite.conferenceId,
           group_id: conferenceInvite.groupId ?? 0,
-          group_name: conferenceInvite.groupName,
-          call_type: conferenceInvite.callType ?? 'voice',
+          group_name: conferenceInvite.groupName ?? 'Group',
+          call_type: callType ?? 'voice',
         });
         setConferenceInvite(null);
         return;
       }
       // Media starts only now, after the owner authenticated and accepted.
-      // Renders via GalleryView (LiveKit), same as starting a group call —
-      // group calls no longer use the mesh CallModal conference path.
-      setActiveGalleryCall({ conferenceId: conferenceInvite.conferenceId, initialCamOn: conferenceInvite.callType === 'video' });
+      // kind comes from the server: a call that picked up a third person is
+      // still a call. A meeting (kind === "meeting") keeps the meeting UI.
+      setActiveGalleryCall({
+        conferenceId: conferenceInvite.conferenceId,
+        initialCamOn: callType === 'video',
+        isAdHocCall: !!kind && kind !== 'meeting',
+      });
       setConferenceInvite(null);
     } catch (err: any) {
       // A wrong token is retryable; the call keeps ringing.
@@ -2457,6 +2463,7 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
         const groupName = (data.group_name as string) || undefined;
         const groupId = (data.group_id as number) || undefined;
         const callType = data.call_type === 'voice' || data.call_type === 'video' ? data.call_type as 'voice' | 'video' : undefined;
+        const kind = typeof data.kind === 'string' ? data.kind as string : undefined;
         if (confId) {
           if (!callsSupported && groupName) {
             setChatJoinError(`${invitedBy} started a group call in ${groupName}. Calling is not available on this version - join from your phone or desktop app.`);
@@ -2465,7 +2472,7 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
           startRinging();
           setConfTokenInput('');
           setConfTokenRejected(false);
-          setConferenceInvite({ conferenceId: confId, invitedBy, participants, groupId, groupName, callType });
+          setConferenceInvite({ conferenceId: confId, invitedBy, participants, groupId, groupName, callType, kind });
         }
       } else if (msg.type === 'conference_answered_elsewhere') {
         // Joined the group call on another of this account's devices.
@@ -2517,7 +2524,11 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
           // this the camera silently defaulted off even on a video call.
           // isAdHocCall: this is still "a call" that picked up a third person,
           // not a Meeting — keep the meeting-only chrome out of it.
-          setActiveGalleryCall({ conferenceId: confId, initialCamOn: data.call_type === 'video', isAdHocCall: true });
+          setActiveGalleryCall({
+            conferenceId: confId,
+            initialCamOn: data.call_type === 'video',
+            isAdHocCall: (data.kind ?? 'call') !== 'meeting',
+          });
         }
       }
     };
@@ -2538,19 +2549,27 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
   useEffect(() => {
     if (!isTauri()) {
       // Web: the in-page call hands off through a window event instead.
-      const onUpgrade = (e: Event) => {
-        const detail = (e as CustomEvent<{ conferenceId: number; camOn?: boolean }>).detail;
+        const onUpgrade = (e: Event) => {
+        const detail = (e as CustomEvent<{ conferenceId: number; camOn?: boolean; kind?: string }>).detail;
         const confId = detail?.conferenceId;
         if (!confId) return;
         setCallWindowOpen(false);
-        setActiveGalleryCall({ conferenceId: confId, initialCamOn: !!detail?.camOn, isAdHocCall: true });
+        setActiveGalleryCall({
+          conferenceId: confId,
+          initialCamOn: !!detail?.camOn,
+          isAdHocCall: (detail?.kind ?? 'call') !== 'meeting',
+        });
       };
       window.addEventListener(UPGRADE_TO_GALLERY_EVENT, onUpgrade);
       return () => window.removeEventListener(UPGRADE_TO_GALLERY_EVENT, onUpgrade);
     }
-    const unlisten = listen<{ conferenceId: number; camOn?: boolean }>('dilarion://upgrade-to-gallery', (event) => {
+    const unlisten = listen<{ conferenceId: number; camOn?: boolean; kind?: string }>('dilarion://upgrade-to-gallery', (event) => {
       setCallWindowOpen(false);
-      setActiveGalleryCall({ conferenceId: event.payload.conferenceId, initialCamOn: !!event.payload.camOn, isAdHocCall: true });
+      setActiveGalleryCall({
+        conferenceId: event.payload.conferenceId,
+        initialCamOn: !!event.payload.camOn,
+        isAdHocCall: (event.payload.kind ?? 'call') !== 'meeting',
+      });
     });
     return () => { unlisten.then(fn => fn()); };
   }, []);
@@ -3770,7 +3789,11 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
         <div className="responsive-overlay" style={ci.backdrop}>
           <div className="responsive-dialog" style={ci.card}>
             <p style={ci.kicker}>
-              {conferenceInvite.callType === 'video' ? 'Group video call' : conferenceInvite.callType === 'voice' ? 'Group voice call' : 'Group call'}
+              {conferenceInvite.groupName
+                ? (conferenceInvite.callType === 'video' ? 'Group video call' : conferenceInvite.callType === 'voice' ? 'Group voice call' : 'Group call')
+                : conferenceInvite.kind === 'meeting'
+                  ? 'Meeting'
+                  : (conferenceInvite.callType === 'video' ? 'Video call' : conferenceInvite.callType === 'voice' ? 'Voice call' : 'Call')}
               {conferenceInvite.groupName ? ` · ${conferenceInvite.groupName}` : ''}
             </p>
             <h3 style={ci.title}>

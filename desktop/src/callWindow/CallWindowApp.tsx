@@ -74,7 +74,7 @@ export default function CallWindowApp() {
         // off and close this window rather than duplicating that UI here.
         // Carry the call's actual camera state so an audio call doesn't
         // silently turn into a video one in the gallery.
-        emitTo('main', 'dilarion://upgrade-to-gallery', { conferenceId: confId, camOn }).catch(() => {});
+        emitTo('main', 'dilarion://upgrade-to-gallery', { conferenceId: confId, camOn, kind: 'call' }).catch(() => {});
         getCurrentWindow().close().catch(() => {});
       }}
     />

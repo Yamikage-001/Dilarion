@@ -80,7 +80,7 @@ fun GalleryScreen(
         return
     }
 
-    if (showChat) {
+    if (showChat && !state.isAdHocCall) {
         MeetingChatSheet(
             conferenceId = conferenceId,
             participantUsernames = state.tiles.filter { !it.isLocal }.map { it.identity },
@@ -95,7 +95,10 @@ fun GalleryScreen(
                 title = {
                     Column {
                         Text(
-                            (state.inBreakoutName?.let { "Breakout: $it" } ?: if (state.isAdHocCall) "Group call" else "Group Video") +
+                            (state.inBreakoutName?.let { "Breakout: $it" }
+                                ?: if (state.isAdHocCall) {
+                                    if ((state.callType ?: if (state.camOn) "video" else "voice") == "voice") "Voice call" else "Video call"
+                                } else "Group Video") +
                                 if (state.tiles.isNotEmpty()) " · ${state.tiles.size}" else "",
                             color = SurfaceWhite,
                         )
@@ -106,7 +109,7 @@ fun GalleryScreen(
                 },
                 actions = {
                     BadgedBox(badge = {
-                        if (state.waiting.isNotEmpty()) Badge { Text("${state.waiting.size}") }
+                        if (!state.isAdHocCall && state.waiting.isNotEmpty()) Badge { Text("${state.waiting.size}") }
                     }) {
                         TextButton(onClick = { viewModel.openParticipants() }) { Text("Participants", color = SurfaceWhite) }
                     }
@@ -124,6 +127,7 @@ fun GalleryScreen(
                             )
                         }
                     }
+                    if (!state.isAdHocCall) {
                     IconButton(onClick = { showChat = true }) {
                         Icon(Icons.Default.Chat, "Chat", tint = SurfaceWhite)
                     }
@@ -139,6 +143,7 @@ fun GalleryScreen(
                             Icons.Default.Draw, "Whiteboard",
                             tint = if (state.whiteboardOwner != null) Color(0xFF6D5EFC) else SurfaceWhite,
                         )
+                    }
                     }
                     IconButton(onClick = { PipController.enter?.invoke() }) {
                         Icon(Icons.Default.PictureInPictureAlt, "Minimize", tint = SurfaceWhite)
@@ -165,7 +170,7 @@ fun GalleryScreen(
         },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-            if (state.whiteboardOwner != null && state.whiteboardOwner != state.myUsername) {
+            if (state.whiteboardOwner != null && state.whiteboardOwner != state.myUsername && !state.isAdHocCall) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -245,7 +250,7 @@ fun GalleryScreen(
         )
     }
 
-    if (state.showBreakoutPanel) {
+    if (state.showBreakoutPanel && !state.isAdHocCall) {
         BreakoutPanelDialog(
             state = state,
             onDismiss = { viewModel.toggleBreakoutPanel(false) },
@@ -431,7 +436,7 @@ private fun ParticipantsSheet(
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-            if (state.waiting.isNotEmpty()) {
+            if (!state.isAdHocCall && state.waiting.isNotEmpty()) {
                 Text(
                     "Waiting to join (${state.waiting.size})",
                     color = Color(0xFFEF4444),

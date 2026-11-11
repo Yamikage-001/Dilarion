@@ -26,10 +26,12 @@ data class ConferenceInviteData(
     /** Set for a WhatsApp-style group call (not a meeting) — joins the group call screen. */
     val groupId: Int? = null,
     val groupName: String? = null,
-    /** "voice" or "video" for a group call. */
+    /** "voice" or "video" for a call. */
     val callType: String? = null,
+    /** "call" | "group_call" | "meeting". The server's record of what this room is. */
+    val kind: String? = null,
 ) {
-    val isGroupCall: Boolean get() = groupName != null
+    val isGroupCall: Boolean get() = groupName != null || kind == "group_call"
 }
 
 /** Someone tried to sign in to this account on another device and was blocked. */
@@ -157,6 +159,9 @@ class CallOverlayViewModel @Inject constructor(
                         // so the call looks like it died on two tiles.
                         NotificationHelper.stopRingtone()
                         _incomingCall.value = null
+                        // conference_upgraded is only sent for a 1:1 that became a
+                        // call. kind on the payload is "call"; the gallery still
+                        // re-reads it from the LiveKit token.
                         _conferenceUpgrade.value = confId to wasVideo
                     }
                     // Being added to a live call rings like any other call: the
@@ -181,6 +186,7 @@ class CallOverlayViewModel @Inject constructor(
                             groupId = data.get("group_id")?.takeIf { !it.isJsonNull }?.asInt,
                             groupName = data.get("group_name")?.takeIf { !it.isJsonNull }?.asString,
                             callType = data.get("call_type")?.takeIf { !it.isJsonNull }?.asString,
+                            kind = data.get("kind")?.takeIf { !it.isJsonNull }?.asString,
                         )
                     }
                 }

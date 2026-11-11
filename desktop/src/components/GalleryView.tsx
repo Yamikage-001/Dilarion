@@ -86,6 +86,14 @@ export default function GalleryView({
   const [tiles, setTiles] = useState<Record<string, Tile>>({});
   const [error, setError] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(true);
+  const [sessionKind, setSessionKind] = useState<string | null>(isAdHocCall ? 'call' : null);
+  const [sessionCallType, setSessionCallType] = useState<'voice' | 'video' | null>(null);
+  // Meeting chrome (waiting room, breakouts, chat, whiteboard, recording)
+  // only after the server says this room is a meeting. A call that forgot to
+  // pass isAdHocCall still corrects itself when the LiveKit token comes back.
+  const adHoc = sessionKind != null && sessionKind !== 'meeting';
+  const showMeetingChrome = sessionKind === 'meeting';
+  const serverMediaApplied = useRef(false);
   const [micOn, setMicOn] = useState(initialMicOn);
   const [camOn, setCamOn] = useState(initialCamOn);
   // Mirrors of the two above for the room-(re)connect effect below, which
@@ -222,11 +230,21 @@ export default function GalleryView({
 
     (async () => {
       try {
-        const [{ url, token: lkToken }, iceServers] = await Promise.all([
-          getLiveKitToken(token, activeConferenceId, displayName),
-          getIceServers(token),
-        ]);
+        const creds = await getLiveKitToken(token, activeConferenceId, displayName);
+        const iceServers = await getIceServers(token);
         if (cancelled) return;
+        const kind = creds.kind ?? (isAdHocCall ? 'call' : 'meeting');
+        setSessionKind(kind);
+        if (kind !== 'meeting') {
+          setIsHost(!!creds.is_host);
+          if (!serverMediaApplied.current && (creds.call_type === 'voice' || creds.call_type === 'video')) {
+            serverMediaApplied.current = true;
+            setSessionCallType(creds.call_type);
+            const cam = creds.call_type === 'video';
+            camOnRef.current = cam;
+            setCamOn(cam);
+          }
+        }
 
         room = new Room({ adaptiveStream: true, dynacast: true });
         roomRef.current = room;
@@ -309,7 +327,7 @@ export default function GalleryView({
           });
 
         if (cancelled) return;
-        await room.connect(url, lkToken, {
+        await room.connect(creds.url, creds.token, {
           rtcConfig: iceServers && iceServers.length > 0 ? { iceServers } : undefined,
         });
         if (cancelled) { room.disconnect(); return; }
@@ -337,13 +355,18 @@ export default function GalleryView({
   // just silently finds nothing to show for a guest. Refreshes on load and on
   // every "someone wants to join" WS push instead of polling.
   useEffect(() => {
-    // Still used for host detection (keeps the recording button working on
-    // an ad-hoc call); isAdHocCall only hides the waiting-room/breakout UI,
-    // it doesn't skip this.
-    getWaitingRoom(token, conferenceId).then(list => { setWaiting(isAdHocCall ? [] : list); setIsHost(true); }).catch(() => {});
+    // Host detection for a meeting still comes from the waiting-room endpoint
+    // (200 means we are the host). A call skips it: the LiveKit token already
+    // said whether we started the call, and the waiting list is meeting-only.
+    if (showMeetingChrome) {
+      getWaitingRoom(token, conferenceId).then(list => { setWaiting(list); setIsHost(true); }).catch(() => {});
+    } else if (adHoc) {
+      setWaiting([]);
+    }
     getMyOrgPrivileges(token).then(privs => setHasCallControlPriv(privs.includes('call_control'))).catch(() => {});
     const onMsg = (msg: WsMessage) => {
       if (msg.type === 'conference_join_request') {
+        if (!showMeetingChrome) return;
         const data = msg.data || {};
         if (data.conference_id !== conferenceId) return;
         setWaiting(prev => (prev.some(w => w.user_id === data.user_id) ? prev : [...prev, { user_id: data.user_id, username: data.username }]));
@@ -428,7 +451,7 @@ export default function GalleryView({
     };
     presenceService.addListener(onMsg);
     return () => presenceService.removeListener(onMsg);
-  }, [token, conferenceId]);
+  }, [token, conferenceId, showMeetingChrome, adHoc]);
 
   async function toggleRecording() {
     setRecordingBusy(true);
@@ -700,7 +723,7 @@ export default function GalleryView({
         <div style={miniAvatarStyle}>{tileList.length}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ color: '#f1f5f9', fontWeight: 700, fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {connecting ? 'Connecting…' : 'In meeting'}
+            {connecting ? 'Connecting…' : (adHoc ? 'In call' : 'In meeting')}
           </div>
           <div style={{ color: '#22c55e', fontSize: '0.72rem', marginTop: 2 }}>
             {tileList.length} participant{tileList.length !== 1 ? 's' : ''}
@@ -709,7 +732,7 @@ export default function GalleryView({
         <button onClick={onMaximize} style={miniBtnStyle} title="Expand">
           <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>
         </button>
-        <button onClick={leave} style={{ ...miniBtnStyle, background: '#ef4444' }} title="Leave meeting">
+        <button onClick={leave} style={{ ...miniBtnStyle, background: '#ef4444' }} title={adHoc ? 'Leave call' : 'Leave meeting'}>
           <svg viewBox="0 0 24 24" width={16} height={16} fill="none" stroke="#fff" strokeWidth={2} strokeLinecap="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07"/><line x1="2" y1="2" x2="22" y2="22" stroke="#fff" strokeWidth="2"/></svg>
         </button>
       </div>
@@ -727,7 +750,11 @@ export default function GalleryView({
         padding: '14px 20px', flexShrink: 0,
       }}>
         <span style={{ color: '#fff', fontWeight: 700, fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: 8 }}>
-          {inBreakoutName ? `Breakout: ${inBreakoutName}` : (title || (isAdHocCall ? 'Group call' : 'Group Video'))} {tileList.length > 0 && `· ${tileList.length}`}
+          {inBreakoutName
+            ? `Breakout: ${inBreakoutName}`
+              : adHoc
+              ? `${(sessionCallType ?? (initialCamOn ? 'video' : 'voice')) === 'voice' ? 'Voice call' : 'Video call'}`
+              : (title || 'Group Video')} {tileList.length > 0 && `· ${tileList.length}`}
           {inBreakoutName && (
             <span style={{ background: 'rgba(124,58,237,0.25)', border: '1px solid rgba(124,58,237,0.5)', borderRadius: 20, padding: '2px 10px', fontSize: '0.68rem', color: '#c4b5fd', fontWeight: 700 }}>
               in breakout room
@@ -741,7 +768,7 @@ export default function GalleryView({
           )}
         </span>
         <div style={{ display: 'flex', gap: 8 }}>
-          {isHost && (
+          {showMeetingChrome && isHost && (
             <button
               onClick={toggleRecording}
               disabled={recordingBusy}
@@ -749,7 +776,7 @@ export default function GalleryView({
               style={{ background: recording ? 'rgba(239,68,68,0.25)' : 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, color: '#fff', width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: recordingBusy ? 'wait' : 'pointer', opacity: recordingBusy ? 0.6 : 1 }}
             ><RecordIcon active={recording} /></button>
           )}
-          {isHost && !isAdHocCall && (
+          {showMeetingChrome && isHost && (
             <button
               onClick={() => {
                 if (breakoutActive) { handleEndBreakout(); return; }
@@ -768,7 +795,7 @@ export default function GalleryView({
             style={{ position: 'relative', background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, color: '#fff', width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
           >
             <PeopleIcon />
-            {waiting.length > 0 && (
+            {showMeetingChrome && waiting.length > 0 && (
               <span style={{
                 position: 'absolute', top: -5, right: -5, minWidth: 16, height: 16, borderRadius: 8,
                 background: '#ef4444', color: '#fff', fontSize: '0.65rem', fontWeight: 700,
@@ -778,11 +805,14 @@ export default function GalleryView({
               </span>
             )}
           </button>
+          {showMeetingChrome && (
           <button
             onClick={() => setShowChat(true)}
             title="Chat"
             style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, color: '#fff', width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
           ><ChatIcon /></button>
+          )}
+          {showMeetingChrome && (
           <button
             onClick={toggleWhiteboard}
             title={
@@ -792,6 +822,7 @@ export default function GalleryView({
             }
             style={{ background: whiteboardOwner ? 'rgba(109,94,252,0.35)' : 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, color: '#fff', width: 34, height: 34, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
           ><WhiteboardIcon /></button>
+          )}
           <button
             onClick={() => setShowControlPanel(v => !v)}
             title="Remote control"
@@ -1047,7 +1078,7 @@ export default function GalleryView({
         </div>
       )}
 
-      {showBreakoutPanel && (
+      {showMeetingChrome && showBreakoutPanel && (
         <div
           style={{ position: 'fixed', inset: 0, zIndex: 970, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
           onClick={e => { if (e.target === e.currentTarget) setShowBreakoutPanel(false); }}
@@ -1125,7 +1156,7 @@ export default function GalleryView({
         </div>
       )}
 
-      {showWhiteboard && (
+      {showMeetingChrome && showWhiteboard && (
         <WhiteboardModal
           token={token}
           target={{ conferenceId }}
@@ -1134,7 +1165,7 @@ export default function GalleryView({
         />
       )}
 
-      {showChat && (
+      {showMeetingChrome && showChat && (
         <MeetingChatPanel
           token={token}
           conferenceId={conferenceId}
@@ -1159,7 +1190,7 @@ export default function GalleryView({
               <span style={{ color: '#fff', fontWeight: 700, fontSize: '0.9rem' }}>Participants ({tileList.length})</span>
               <button onClick={() => setShowParticipants(false)} style={{ background: 'transparent', border: 'none', color: '#aaa', cursor: 'pointer', display: 'flex' }}><SharedCloseIcon size={16} color="#aaa" /></button>
             </div>
-            {waiting.length > 0 && (
+            {showMeetingChrome && waiting.length > 0 && (
               <div style={{ padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
                 <span style={{ color: '#ef4444', fontWeight: 700, fontSize: '0.78rem' }}>Waiting to join ({waiting.length})</span>
                 {waiting.map(w => (

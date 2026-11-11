@@ -213,13 +213,31 @@ export function startCallWindowForwardBridge(): () => void {
     presenceService.injectMessage(event.payload);
   }).then(fn => {
     unlisten = fn;
-    // Now that we're listening, ask the main window to replay any call events
-    // (the caller's early ICE candidates) that arrived while this window was
-    // still opening — otherwise an answered incoming call never gets them.
-    emitTo('main', CALL_WINDOW_READY, {}).catch(() => {});
+    callBridgeListening = true;
+    // Replay only once CallModal has subscribed. Asking here used to race
+    // the window's first render: the candidates arrived, nobody was listening,
+    // and the answerer never learned the caller's ICE.
+    flushCallReplayRequest();
   });
-  return () => { unlisten?.(); };
+  return () => { unlisten?.(); callBridgeListening = false; };
 }
+
+/** CallModal calls this after its signaling listener is registered, so the
+ *  replayed candidates are filtered against a call id that is already set. */
+export function requestCallEventReplay() {
+  if (!isCallWindow()) return;
+  callReplayRequested = true;
+  flushCallReplayRequest();
+}
+
+function flushCallReplayRequest() {
+  if (!callBridgeListening || !callReplayRequested) return;
+  callReplayRequested = false;
+  emitTo('main', CALL_WINDOW_READY, {}).catch(() => {});
+}
+
+let callBridgeListening = false;
+let callReplayRequested = false;
 
 /** Main-window side: when a call window signals it's ready, replay the buffered
  *  call events to it. Registered once from the main window (see connect()). */

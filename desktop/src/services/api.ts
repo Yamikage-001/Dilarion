@@ -811,7 +811,7 @@ export async function conferenceAccept(
   token: string,
   conferenceId: number,
   masterToken: string,
-): Promise<{ participants: string[] }> {
+): Promise<{ participants: string[]; kind?: string; call_type?: 'voice' | 'video' | null }> {
   const res = await apiFetch(`${BASE}/calls/conference/${conferenceId}/accept`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -825,7 +825,11 @@ export async function conferenceAccept(
     throw err;
   }
   const body = await res.json();
-  return { participants: body.participants ?? [] };
+  return {
+    participants: body.participants ?? [],
+    kind: body.kind,
+    call_type: body.call_type === 'voice' || body.call_type === 'video' ? body.call_type : null,
+  };
 }
 
 export async function conferenceDecline(token: string, conferenceId: number): Promise<void> {
@@ -858,6 +862,10 @@ export interface LiveKitTokenResponse {
   url: string;
   token: string;
   room: string;
+  /** "call" | "group_call" | "meeting" — the server's record, not a client guess. */
+  kind?: string;
+  call_type?: 'voice' | 'video' | null;
+  is_host?: boolean;
 }
 
 /** Normalize server configuration for LiveKit clients. The SDK appends its

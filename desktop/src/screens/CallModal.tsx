@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { presenceService } from '../services/presence';
+import { presenceService, requestCallEventReplay } from '../services/presence';
 import { initiateCall, performCallAction, sendCallIceCandidate, setCallMediaState, getCallStatus, createConference, conferenceInvite, conferenceSignal, conferenceLeave, getUsers, getIceServers, Contact, CALL_TERMINAL_STATUSES, profilePictureUrl } from '../services/api';
 import { CloseIcon, MuteIcon } from '../components/Icons';
 import { userMessage } from '../services/errors';
@@ -51,6 +51,14 @@ function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 3500): Promise<v
     };
     pc.addEventListener('icegatheringstatechange', check);
   });
+}
+
+async function addIceCandidateLogged(pc: RTCPeerConnection, candidate: RTCIceCandidateInit, where: string) {
+  try {
+    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+  } catch (err) {
+    console.warn(`[ice] addIceCandidate failed (${where})`, candidate, err);
+  }
 }
 
 // ── ICE servers ───────────────────────────────────────────────────────────────
@@ -219,10 +227,19 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const callIdRef = useRef<number | null>(incomingCallId ?? null);
+  // The call window replays ICE that arrived while it was still opening.
+  // That replay is requested only after the listener below is registered,
+  // and this ref has to already hold the call id or the replay is discarded
+  // by the call_id check. Setting it during render (not in an effect) is
+  // what makes that true on the first pass.
+  if (incomingCallId != null) callIdRef.current = incomingCallId;
   // Buffer outgoing ICE candidates before callId is set
   const iceBufRef = useRef<RTCIceCandidateInit[]>([]);
   // Buffer incoming ICE candidates before remote description is set
   const remoteIceBufRef = useRef<RTCIceCandidateInit[]>([]);
+  // Conference mesh: candidates that arrive before that peer's remote
+  // description is set. Keyed by username.
+  const confIceBufRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const remoteDescSetRef = useRef(false);
   const answerPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Answer kept so a rejected master token can be retried without rebuilding it.
@@ -278,6 +295,7 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     };
 
     pc.onconnectionstatechange = () => {
+      console.log('[ice] connectionState', pc.connectionState, 'ice', pc.iceConnectionState);
       if (pc.connectionState === 'connected') {
         markConnected();
       } else if (pc.connectionState === 'failed') {
@@ -298,6 +316,7 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     };
 
     pc.oniceconnectionstatechange = () => {
+      console.log('[ice] iceConnectionState', pc.iceConnectionState, 'connection', pc.connectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') markConnected();
     };
 
@@ -329,9 +348,7 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
       remoteDescSetRef.current = true;
       const queued = remoteIceBufRef.current.splice(0);
-      for (const c of queued) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
-      }
+      for (const c of queued) await addIceCandidateLogged(pc, c, 'applyAnswer');
     } catch {}
   }, []);
 
@@ -400,11 +417,10 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
       if (incomingOfferSdp) {
         await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: incomingOfferSdp }));
         remoteDescSetRef.current = true;
-        // Flush ICE candidates that arrived before we accepted
+        // Flush ICE candidates that arrived before we accepted — including
+        // ones that showed up before this peer connection existed.
         const queued = remoteIceBufRef.current.splice(0);
-        for (const c of queued) {
-          try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
-        }
+        for (const c of queued) await addIceCandidateLogged(pc, c, 'acceptCall');
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         // Wait for TURN relay candidates to be gathered before sending answer
@@ -471,15 +487,20 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
         return;
       }
 
-      // ice_candidate from backend — queue if remote desc not yet set
+      // ice_candidate from backend. Queue first: the peer connection does not
+      // exist until the callee accepts, and candidates the caller trickled
+      // during the ring are replayed the moment this window opens. Returning
+      // here when pc is null used to drop them, so the callee never learned
+      // the caller's addresses and sat on "Connecting…".
       if (msg.type === 'ice_candidate' && Number(data.call_id) === callIdRef.current) {
+        if (!data.candidate) return;
         const pc = pcRef.current;
-        if (!pc || !data.candidate) return;
-        if (!remoteDescSetRef.current) {
+        if (!pc || !remoteDescSetRef.current) {
           remoteIceBufRef.current.push(data.candidate);
-        } else {
-          try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch {}
+          if (!pc) console.log('[ice] queued candidate before peer connection', data.call_id);
+          return;
         }
+        await addIceCandidateLogged(pc, data.candidate, 'ice_candidate');
         return;
       }
 
@@ -540,13 +561,25 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
         }
         if (signalType === 'offer') {
           await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signalData.sdp }));
+          const early = confIceBufRef.current.get(fromUser) ?? [];
+          confIceBufRef.current.delete(fromUser);
+          for (const c of early) await addIceCandidateLogged(pc, c, `conference-offer:${fromUser}`);
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           await conferenceSignal(token, confId, fromUser, 'answer', { sdp: answer.sdp }).catch(() => {});
         } else if (signalType === 'answer') {
           await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signalData.sdp }));
+          const early = confIceBufRef.current.get(fromUser) ?? [];
+          confIceBufRef.current.delete(fromUser);
+          for (const c of early) await addIceCandidateLogged(pc, c, `conference-answer:${fromUser}`);
         } else if (signalType === 'ice_candidate') {
-          try { await pc.addIceCandidate(new RTCIceCandidate(signalData)); } catch {}
+          if (!pc.remoteDescription) {
+            const q = confIceBufRef.current.get(fromUser) ?? [];
+            q.push(signalData);
+            confIceBufRef.current.set(fromUser, q);
+          } else {
+            await addIceCandidateLogged(pc, signalData, `conference:${fromUser}`);
+          }
         }
       }
 
@@ -556,6 +589,9 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     };
 
     presenceService.addListener(handler);
+    // After the listener is on, and only then: replay candidates that arrived
+    // while this window was opening. callIdRef is already set from the prop.
+    requestCallEventReplay();
     return () => presenceService.removeListener(handler);
   }, [partner]);
 
@@ -798,6 +834,52 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     const t = setTimeout(closeOnce, error ? 6000 : 4000);
     return () => clearTimeout(t);
   }, [state]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ICE that never finishes used to leave this window on "Connecting…" with
+  // no way out. One restart, then a plain failure the call-back buttons can
+  // retry. Ringing is not this timer — a call can ring for the full timeout.
+  useEffect(() => {
+    if (state !== 'connecting') return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        const pc = pcRef.current;
+        const ice = pc?.iceConnectionState;
+        if (cancelled) return;
+        if (!pc) {
+          console.warn('[ice] giving up, no peer connection');
+          setError("Couldn't connect. Check your network and try again.");
+          const id = callIdRef.current;
+          if (id) performCallAction(token, id, 'end').catch(() => {});
+          finishCall();
+          return;
+        }
+        if (ice === 'connected' || ice === 'completed') return;
+        if (!iceRestartedRef.current) {
+          iceRestartedRef.current = true;
+          console.warn('[ice] not connected after 15s — restarting', { ice, connection: pc.connectionState });
+          try { pc.restartIce(); } catch (err) { console.warn('[ice] restartIce failed', err); }
+          setReconnecting(true);
+          await new Promise(resolve => setTimeout(resolve, 10_000));
+          if (cancelled) return;
+          const ice2 = pcRef.current?.iceConnectionState;
+          if (ice2 === 'connected' || ice2 === 'completed') {
+            setReconnecting(false);
+            return;
+          }
+        }
+        console.warn('[ice] giving up', {
+          ice: pcRef.current?.iceConnectionState,
+          connection: pcRef.current?.connectionState,
+        });
+        setError("Couldn't connect. Check your network and try again.");
+        const id = callIdRef.current;
+        if (id) performCallAction(token, id, 'end').catch(() => {});
+        finishCall();
+      })();
+    }, 15_000);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [state, token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function openDeviceMenu(kind: 'audioinput' | 'videoinput') {
     if (deviceMenu === kind) { setDeviceMenu(null); return; }

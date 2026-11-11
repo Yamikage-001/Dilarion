@@ -99,10 +99,14 @@ fun IncomingConferenceOverlay(
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                when (invite.callType) {
-                    "video" -> "Group video call"
-                    "voice" -> "Group voice call"
-                    else -> "Group call"
+                when {
+                    invite.groupName != null && invite.callType == "video" -> "Group video call"
+                    invite.groupName != null && invite.callType == "voice" -> "Group voice call"
+                    invite.groupName != null -> "Group call"
+                    invite.kind == "meeting" -> "Meeting"
+                    invite.callType == "video" -> "Video call"
+                    invite.callType == "voice" -> "Voice call"
+                    else -> "Call"
                 } + (invite.groupName?.let { " · $it" } ?: ""),
                 color = SurfaceWhite.copy(alpha = 0.7f),
                 fontSize = 14.sp,

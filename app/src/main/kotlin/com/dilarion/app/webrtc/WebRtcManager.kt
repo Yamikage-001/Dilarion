@@ -207,7 +207,8 @@ class WebRtcManager @Inject constructor(
                 Log.d(TAG, "signalingState=$s")
             }
             override fun onIceConnectionChange(s: PeerConnection.IceConnectionState?) {
-                Log.i(TAG, "iceConnectionState=$s")
+                val connection = runCatching { peerConnection?.connectionState() }.getOrNull()
+                Log.i(TAG, "iceConnectionState=$s connectionState=$connection")
                 if (s == PeerConnection.IceConnectionState.CONNECTED ||
                     s == PeerConnection.IceConnectionState.COMPLETED) {
                     _iceConnected.value = true
@@ -412,8 +413,27 @@ class WebRtcManager @Inject constructor(
     }
 
     fun addIceCandidate(sdpMid: String, sdpMLineIndex: Int, candidateStr: String) {
-        Log.d(TAG, "addIceCandidate mid=$sdpMid")
-        peerConnection?.addIceCandidate(IceCandidate(sdpMid, sdpMLineIndex, candidateStr))
+        val pc = peerConnection
+        if (pc == null) {
+            Log.w(TAG, "addIceCandidate dropped, no peer connection: $candidateStr")
+            return
+        }
+        val ok = pc.addIceCandidate(IceCandidate(sdpMid, sdpMLineIndex, candidateStr))
+        if (!ok) Log.w(TAG, "addIceCandidate returned false mid=$sdpMid candidate=$candidateStr")
+        else Log.d(TAG, "addIceCandidate mid=$sdpMid")
+    }
+
+    /** One ICE restart. The caller still has to renegotiate for it to finish;
+     *  the watchdog uses this as the attempt before it reports failure. */
+    fun restartIce() {
+        val pc = peerConnection
+        if (pc == null) {
+            Log.w(TAG, "restartIce skipped, no peer connection")
+            return
+        }
+        runCatching { pc.restartIce() }
+            .onFailure { Log.w(TAG, "restartIce failed", it) }
+        Log.i(TAG, "restartIce requested ice=${pc.iceConnectionState()} connection=${runCatching { pc.connectionState() }.getOrNull()}")
     }
 
     fun setMuted(muted: Boolean) {
@@ -442,6 +462,7 @@ class WebRtcManager @Inject constructor(
         val pc = f.createPeerConnection(rtcConfig, object : PeerConnection.Observer {
             override fun onSignalingChange(s: PeerConnection.SignalingState?) {}
             override fun onIceConnectionChange(s: PeerConnection.IceConnectionState?) {
+                Log.i(TAG, "conference iceConnectionState=$s peer=$peerUsername")
                 if (s == PeerConnection.IceConnectionState.CONNECTED ||
                     s == PeerConnection.IceConnectionState.COMPLETED) {
                     logSelectedCandidatePair()

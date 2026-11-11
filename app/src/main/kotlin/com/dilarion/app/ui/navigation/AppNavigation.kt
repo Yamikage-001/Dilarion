@@ -146,7 +146,13 @@ fun AppNavigation(pendingIncomingCall: IncomingCallData? = null) {
                         Screen.GroupCall.route(confId, invite.groupId ?: 0, invite.groupName ?: "Group", invite.callType ?: "voice")
                     )
                 } else {
-                    navController.navigate(Screen.Gallery.route(confId))
+                    // kind is the server's record. A call (or anything that is
+                    // not a meeting) must not open the meeting UI. Camera follows
+                    // the call that was already in progress.
+                    val adHoc = invite.kind != null && invite.kind != "meeting"
+                    navController.navigate(
+                        Screen.Gallery.route(confId, camOn = invite.callType == "video", isAdHoc = adHoc)
+                    )
                 }
             },
         )

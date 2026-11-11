@@ -51,7 +51,7 @@ export default function InPageCallHost() {
           onUpgradeToGallery={(confId: number, camOn: boolean) => {
             // Carry the call's actual camera state so an audio call doesn't
             // silently turn into a video one in the gallery.
-            window.dispatchEvent(new CustomEvent(UPGRADE_TO_GALLERY_EVENT, { detail: { conferenceId: confId, camOn } }));
+            window.dispatchEvent(new CustomEvent(UPGRADE_TO_GALLERY_EVENT, { detail: { conferenceId: confId, camOn, kind: 'call' } }));
             end();
           }}
         />

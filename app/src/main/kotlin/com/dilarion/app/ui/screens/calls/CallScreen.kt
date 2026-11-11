@@ -118,11 +118,22 @@ fun CallScreen(
     }
 
     uiState.error?.let { err ->
+        val canRetry = uiState.peerUsername.isNotBlank()
         AlertDialog(
-            onDismissRequest = viewModel::clearError,
+            onDismissRequest = { viewModel.clearError(); if (!canRetry) onCallEnded() },
             title = { Text("Call error") },
             text = { Text(err) },
-            confirmButton = { TextButton(onClick = { viewModel.clearError(); onCallEnded() }) { Text("OK") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    val peer = uiState.peerUsername
+                    val type = uiState.callType
+                    viewModel.clearError()
+                    if (peer.isNotBlank()) viewModel.startOutgoingCall(peer, type) else onCallEnded()
+                }) { Text(if (canRetry) "Try again" else "OK") }
+            },
+            dismissButton = if (canRetry) {
+                { TextButton(onClick = { viewModel.clearError(); onCallEnded() }) { Text("Close") } }
+            } else null,
         )
     }
 

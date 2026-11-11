@@ -66,10 +66,11 @@ data class GalleryUiState(
     val showBreakoutPanel: Boolean = false,
     val breakoutBusy: Boolean = false,
     val breakoutError: String? = null,
-    // A 1:1 call that picked up a third participant, not a Meeting someone
-    // explicitly started — same room/transport, just without meeting-only
-    // chrome (breakout rooms, waiting room/admit).
+    // A 1:1 call that picked up a third participant, or any room whose server
+    // kind is not "meeting". Same transport, without meeting-only chrome.
     val isAdHocCall: Boolean = false,
+    /** "voice" | "video" from the server, for the call title and camera. */
+    val callType: String? = null,
 )
 
 /**
@@ -102,6 +103,9 @@ class GalleryViewModel @Inject constructor(
     private var lastMicOn: Boolean = true
     private var lastCamOn: Boolean = true
     private var lastDisplayName: String? = null
+    // Server call_type is applied once, on the first join. A breakout hop
+    // must keep whatever the user did to the camera after that.
+    private var appliedServerCallType = false
     /** Left the call. Later LiveKit track events must not put their tile back. */
     private val departed = mutableSetOf<String>()
 
@@ -364,10 +368,6 @@ class GalleryViewModel @Inject constructor(
         lastCamOn = initialCamOn
         lastDisplayName = displayName
         _uiState.value = _uiState.value.copy(isAdHocCall = isAdHocCall)
-        // Waiting room / host status is always about the parent meeting, even
-        // after switching into a breakout room — mirrors desktop, which keys
-        // this effect on [token, conferenceId] (the prop), not activeConferenceId.
-        loadWaitingRoom(conferenceId)
         connectRoom(conferenceId, initialMicOn, initialCamOn, displayName)
     }
 
@@ -383,6 +383,23 @@ class GalleryViewModel @Inject constructor(
                     else "Failed to get video token (${resp.code()})"
                 )
                 val body = resp.body() ?: throw IllegalStateException("Failed to get video token")
+
+                val kind = body.kind ?: if (_uiState.value.isAdHocCall) "call" else "meeting"
+                val adHoc = kind != "meeting"
+                var cam = initialCamOn
+                if (adHoc && !appliedServerCallType && (body.callType == "voice" || body.callType == "video")) {
+                    appliedServerCallType = true
+                    cam = body.callType == "video"
+                    lastCamOn = cam
+                }
+                _uiState.value = _uiState.value.copy(
+                    isAdHocCall = adHoc,
+                    callType = body.callType ?: _uiState.value.callType,
+                    camOn = cam,
+                    isHost = if (adHoc) body.isHost else _uiState.value.isHost,
+                    waiting = if (adHoc) emptyList() else _uiState.value.waiting,
+                )
+                if (!adHoc) loadWaitingRoom(parentConferenceId.takeIf { it > 0 } ?: conferenceId)
 
                 // Both default to false in the SDK — unlike desktop (which passes
                 // {adaptiveStream:true, dynacast:true} explicitly), so without this
@@ -429,7 +446,7 @@ class GalleryViewModel @Inject constructor(
 
                 r.connect(body.url, body.token, ConnectOptions(iceServers = iceServers))
                 r.localParticipant.setMicrophoneEnabled(initialMicOn)
-                r.localParticipant.setCameraEnabled(initialCamOn)
+                r.localParticipant.setCameraEnabled(cam)
 
                 upsertTile(r.localParticipant, true)
                 r.remoteParticipants.values.forEach { upsertTile(it, false) }

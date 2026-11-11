@@ -817,6 +817,10 @@ data class LiveKitTokenResponse(
     val url: String,
     val token: String,
     val room: String,
+    /** "call" | "group_call" | "meeting". Absent on servers that predate the column. */
+    val kind: String? = null,
+    @SerializedName("call_type") val callType: String? = null,
+    @SerializedName("is_host") val isHost: Boolean = false,
 )
 
 // ─── Breakout rooms ────────────────────────────────────────────────────────────
