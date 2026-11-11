@@ -94,10 +94,11 @@ fun AppNavigation(pendingIncomingCall: IncomingCallData? = null) {
         // Drop the 1:1 call screen so its "ended" state can't sit under the
         // group room or pop the user out of it.
         navController.popBackStack(Screen.Call.route, inclusive = true)
-        // isAdHoc: still a call that picked up a third person, not a Meeting
-        // someone explicitly started — keep video/audio as it was, and keep
-        // meeting-only chrome (breakout rooms, waiting room) out of it.
-        navController.navigate(Screen.Gallery.route(confId, camOn = wasVideo, isAdHoc = true))
+        // Same call screen the 1:1 was on, now with more people. The meeting
+        // room is not this path.
+        navController.navigate(
+            Screen.GroupCall.route(confId, 0, "Call", if (wasVideo) "video" else "voice")
+        )
     }
 
     // Inject call from notification intent into overlay VM
@@ -145,13 +146,16 @@ fun AppNavigation(pendingIncomingCall: IncomingCallData? = null) {
                     navController.navigate(
                         Screen.GroupCall.route(confId, invite.groupId ?: 0, invite.groupName ?: "Group", invite.callType ?: "voice")
                     )
-                } else {
-                    // kind is the server's record. A call (or anything that is
-                    // not a meeting) must not open the meeting UI. Camera follows
-                    // the call that was already in progress.
-                    val adHoc = invite.kind != null && invite.kind != "meeting"
+                } else if (invite.kind == "meeting") {
                     navController.navigate(
-                        Screen.Gallery.route(confId, camOn = invite.callType == "video", isAdHoc = adHoc)
+                        Screen.Gallery.route(confId, camOn = invite.callType == "video", isAdHoc = false)
+                    )
+                } else {
+                    navController.navigate(
+                        Screen.GroupCall.route(
+                            confId, 0, invite.invitedBy.ifBlank { "Call" },
+                            if (invite.callType == "video") "video" else "voice",
+                        )
                     )
                 }
             },
@@ -370,7 +374,9 @@ fun AppNavigation(pendingIncomingCall: IncomingCallData? = null) {
                 onOpenGallery = { confId, wasVideo ->
                     overlayVm.clearMinimized()
                     navController.popBackStack()
-                    navController.navigate(Screen.Gallery.route(confId, camOn = wasVideo, isAdHoc = true))
+                    navController.navigate(
+                        Screen.GroupCall.route(confId, 0, username, if (wasVideo) "video" else "voice")
+                    )
                 },
                 onMinimize = { callId ->
                     overlayVm.setMinimized(callId ?: 0, username)

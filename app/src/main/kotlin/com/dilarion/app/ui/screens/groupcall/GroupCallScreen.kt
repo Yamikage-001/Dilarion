@@ -100,7 +100,9 @@ fun GroupCallScreen(
         GroupCallStatus.ACTIVE -> state.startedAtMs?.let { fmtDur((nowMs - it).coerceAtLeast(0) / 1000) } ?: ""
         GroupCallStatus.ENDED -> state.endReason ?: "Call ended"
     }
-    val label = if (isVideo) "Group video call" else "Group voice call"
+    val label = if (groupId == 0) {
+        if (state.camOn) "Video call" else "Voice call"
+    } else if (isVideo) "Group video call" else "Group voice call"
     val room = viewModel.room
 
     Box(Modifier.fillMaxSize().background(CallBg)) {
@@ -146,7 +148,7 @@ fun GroupCallScreen(
                         Text(groupName, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 22.sp)
                         Spacer(Modifier.height(6.dp))
                         Text(
-                            if (state.status == GroupCallStatus.RINGING) "Ringing group members…" else statusText,
+                            if (state.status == GroupCallStatus.RINGING && groupId != 0) "Ringing group members…" else statusText,
                             color = Color(0xFF9CA3AF), fontSize = 15.sp,
                         )
                     }

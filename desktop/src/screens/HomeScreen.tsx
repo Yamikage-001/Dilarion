@@ -68,7 +68,7 @@ import ChatPanel from './ChatPanel';
 import GroupPanel from './GroupPanel';
 import { CreateGroupModal, JoinGroupModal } from '../components/GroupDialogs';
 import { CallType, IncomingCall } from './CallModal';
-import { openCallWindow, closeCallWindowIfOpen, UPGRADE_TO_GALLERY_EVENT } from '../services/callWindow';
+import { openCallWindow, UPGRADE_TO_GALLERY_EVENT } from '../services/callWindow';
 import { isTauri } from '../services/platform';
 import InPageCallHost from '../components/InPageCallHost';
 import type { GroupCallInfo } from '../callWindow/GroupCallView';
@@ -2242,14 +2242,22 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
         setConferenceInvite(null);
         return;
       }
-      // Media starts only now, after the owner authenticated and accepted.
-      // kind comes from the server: a call that picked up a third person is
-      // still a call. A meeting (kind === "meeting") keeps the meeting UI.
-      setActiveGalleryCall({
-        conferenceId: conferenceInvite.conferenceId,
-        initialCamOn: callType === 'video',
-        isAdHocCall: !!kind && kind !== 'meeting',
-      });
+      // A meeting opens the meeting room. Anything else — a 1:1 that picked
+      // up more people — stays a call, in the call window.
+      if (kind === 'meeting') {
+        setActiveGalleryCall({
+          conferenceId: conferenceInvite.conferenceId,
+          initialCamOn: callType === 'video',
+          isAdHocCall: false,
+        });
+      } else {
+        openGroupCallWindow({
+          conference_id: conferenceInvite.conferenceId,
+          group_id: 0,
+          group_name: conferenceInvite.invitedBy || 'Call',
+          call_type: callType === 'video' ? 'video' : 'voice',
+        });
+      }
       setConferenceInvite(null);
     } catch (err: any) {
       // A wrong token is retryable; the call keeps ringing.
@@ -2511,25 +2519,10 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
           });
         }
       } else if (msg.type === 'conference_upgraded') {
-        // The other side of our 1:1 call added someone. A conference lives in the
-        // LiveKit room, not on our mesh peer connection, so follow them into it
-        // instead of sitting on a leg no one else is on.
-        const data = (msg as any).data || {};
-        const confId = Number(data.conference_id);
-        if (confId) {
-          stopRinging();
-          setIncomingCall(null);
-          closeCallWindowIfOpen().catch(() => {});
-          // Carry the 1:1 call's actual type into the conference — without
-          // this the camera silently defaulted off even on a video call.
-          // isAdHocCall: this is still "a call" that picked up a third person,
-          // not a Meeting — keep the meeting-only chrome out of it.
-          setActiveGalleryCall({
-            conferenceId: confId,
-            initialCamOn: data.call_type === 'video',
-            isAdHocCall: (data.kind ?? 'call') !== 'meeting',
-          });
-        }
+        // The call window itself switches onto the multi-person call. Opening
+        // the meeting room here is what turned a call into a meeting.
+        stopRinging();
+        setIncomingCall(null);
       }
     };
 

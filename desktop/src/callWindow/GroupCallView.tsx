@@ -270,7 +270,10 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
     : status === 'ended' ? (error || endReason || 'Call ended')
     : '';
 
-  const label = info.call_type === 'video' ? 'Group video call' : 'Group voice call';
+  // group_id 0 is a 1:1 call that grew. It keeps the call name, not "Group".
+  const label = info.group_id
+    ? (info.call_type === 'video' ? 'Group video call' : 'Group voice call')
+    : (camOn ? 'Video call' : 'Voice call');
 
   return (
     <div className="group-call" style={{ position: 'fixed', inset: 0, background: '#0b141a', display: 'flex', flexDirection: 'column', color: '#fff', fontFamily: 'inherit' }}>
@@ -310,7 +313,7 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
             }}>{initials(info.group_name)}</div>
             <div style={{ fontSize: '1.3rem', fontWeight: 700 }}>{info.group_name}</div>
             <div style={{ fontSize: '0.9rem', color: '#9ca3af' }}>
-              {status === 'ringing' ? 'Ringing group members…' : statusText}
+              {status === 'ringing' ? (info.group_id ? 'Ringing group members…' : 'Connecting…') : statusText}
             </div>
             {/* Own camera preview while waiting for others on a video call */}
             {room && camOn && status !== 'ended' && (

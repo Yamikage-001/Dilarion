@@ -95,6 +95,8 @@ class CallViewModel @Inject constructor(
     private var answerPollJob: kotlinx.coroutines.Job? = null
     private var wsObserverJob: kotlinx.coroutines.Job? = null
     private var iceConnectedJob: kotlinx.coroutines.Job? = null
+    /** The 1:1 leg is being replaced by the multi-person call. A following "end" is not a hangup. */
+    private var upgradedAway = false
     private var connectWatchdog: kotlinx.coroutines.Job? = null
     private val iceLock = Any()
 
@@ -127,6 +129,7 @@ class CallViewModel @Inject constructor(
     private val pendingRemoteCandidates = mutableListOf<Triple<String, Int, String>>()
 
     fun startOutgoingCall(peerUsername: String, type: CallType) {
+        upgradedAway = false
         // Drop anything left over from a previous call before building a new one,
         // otherwise the old PeerConnection keeps the mic/audio alive and the new
         // offer is created on a stale connection.
@@ -173,6 +176,7 @@ class CallViewModel @Inject constructor(
     }
 
     fun setIncoming(incoming: IncomingCallData) {
+        upgradedAway = false
         webRtcManager.closeCall()
         timerJob?.cancel()
         remoteDescSet = false
@@ -459,6 +463,7 @@ class CallViewModel @Inject constructor(
     }
 
     fun resetToIdle() {
+        upgradedAway = false
         timerJob?.cancel()
         timerJob = null
         answerPollJob?.cancel()
@@ -504,7 +509,10 @@ class CallViewModel @Inject constructor(
                             in CALL_TERMINAL_STATUSES -> {
                                 // The 1:1 leg is closed on purpose when the call
                                 // moves into the group room. That is not a hangup.
-                                if (_conferenceUpgrade.value != null) return@collect
+                                if (_conferenceUpgrade.value != null || upgradedAway) {
+                                    teardownMedia()
+                                    return@collect
+                                }
                                 // Remote hung up — kill our side of the media too,
                                 // otherwise both peers keep hearing each other.
                                 // "missed" belongs here: it is what the server
@@ -517,6 +525,10 @@ class CallViewModel @Inject constructor(
                                 _uiState.value = _uiState.value.copy(state = CallState.ENDED)
                             }
                         }
+                    }
+                    "conference_upgraded" -> {
+                        val callId = data.get("call_id")?.takeIf { !it.isJsonNull }?.asInt ?: return@collect
+                        if (callId == _uiState.value.callId) upgradedAway = true
                     }
                     "call_media_state" -> {
                         val callIdEvt = data.get("call_id")?.asInt ?: return@collect

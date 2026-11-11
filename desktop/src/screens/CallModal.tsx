@@ -467,6 +467,21 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     const handler = async (msg: any) => {
       const data = msg.data || {};
 
+      // The other person added someone. Stay in this call window and move onto
+      // the same LiveKit room — do not treat the 1:1 leg closing as a hangup,
+      // and do not open the meeting screen.
+      if (msg.type === 'conference_upgraded') {
+        const confId = Number(data.conference_id);
+        const callId = data.call_id == null ? null : Number(data.call_id);
+        if (!confId || (callId != null && callId !== callIdRef.current) || !onUpgradeToGallery) return;
+        upgradingRef.current = true;
+        if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
+        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+        stopAllMedia();
+        onUpgradeToGallery(confId, data.call_type === 'video' || isVideo);
+        return;
+      }
+
       // call_status_update — caller gets answer_sdp when callee accepts
       if (msg.type === 'call_status_update' && Number(data.call_id) === callIdRef.current) {
         if (data.status === 'calling') {
@@ -479,6 +494,9 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
           setState('connecting');
           if (data.answer_sdp) await applyAnswer(data.answer_sdp);
         } else if (CALL_TERMINAL_STATUSES.includes(data.status)) {
+          // The 1:1 leg is closed on purpose once the call moves into the
+          // multi-person room. That is not the other person hanging up.
+          if (upgradingRef.current) return;
           // Includes "missed" — how the server reports the caller hanging up
           // before we answered. Without it this side kept ringing after they
           // had already given up.
@@ -803,6 +821,7 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
    * dismisses it (or redials) from there.
    */
   function finishCall() {
+    if (upgradingRef.current) return;
     if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
     if (timerRef.current) clearInterval(timerRef.current);
     stopAllMedia();

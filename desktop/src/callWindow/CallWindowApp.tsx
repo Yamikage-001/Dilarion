@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { emitTo } from '@tauri-apps/api/event';
 import CallModal, { CallType } from '../screens/CallModal';
 import GroupCallView from './GroupCallView';
 import { startCallWindowForwardBridge } from '../services/presence';
@@ -70,12 +69,17 @@ export default function CallWindowApp() {
         }, 250);
       }}
       onUpgradeToGallery={(confId: number, camOn: boolean) => {
-        // Group video runs in the main window (GalleryView/LiveKit) — hand
-        // off and close this window rather than duplicating that UI here.
-        // Carry the call's actual camera state so an audio call doesn't
-        // silently turn into a video one in the gallery.
-        emitTo('main', 'dilarion://upgrade-to-gallery', { conferenceId: confId, camOn, kind: 'call' }).catch(() => {});
-        getCurrentWindow().close().catch(() => {});
+        // A call stays in this window when someone is added. The meeting
+        // screen (GalleryView) is only for an actual meeting.
+        setCall({
+          ...call,
+          group_call: {
+            conference_id: confId,
+            group_id: 0,
+            group_name: call.partner,
+            call_type: camOn ? 'video' : 'voice',
+          },
+        });
       }}
     />
   );
