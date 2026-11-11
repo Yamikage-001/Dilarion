@@ -9,6 +9,8 @@ import {
   getPendingDeviceCommands,
   getGroups,
   getCallHistory,
+  getCallStatus,
+  redialGroupCall,
   getUsers,
   confirmMasterToken,
   createMasterToken,
@@ -1931,12 +1933,12 @@ function CallsList({ calls, loading, selectedCallId, onSelectCall }: CallsListPr
             <div style={hs.contactAvatar}>{initials(call.other_party_username)}</div>
             <div style={hs.itemInfo}>
               <span style={{ ...hs.itemName, color: isMissed ? '#ef4444' : 'var(--text-primary)' }}>
-                {call.other_party_username}
+                {call.is_group ? (call.other_party_username || 'Group call') : call.other_party_username}
               </span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                 {callIcon}
                 <span style={{ fontSize: '0.72rem', color: elsewhere ? 'var(--text-secondary)' : statusColor }}>
-                  {elsewhere ? 'Answered on another device' : call.status}
+                  {call.is_group ? 'Group call' : elsewhere ? 'Answered on another device' : call.status}
                   {call.duration > 0 ? ` · ${fmtDuration(call.duration)}` : ''}
                 </span>
               </div>
@@ -1953,9 +1955,10 @@ function CallsList({ calls, loading, selectedCallId, onSelectCall }: CallsListPr
 
 // ── Call Detail Panel ──────────────────────────────────────────────────────────
 
-function CallDetailPanel({ call, onCall }: {
+function CallDetailPanel({ call, onCall, onGroupCall }: {
   call: CallRecord | null;
   onCall: (partner: string, type: CallType) => void;
+  onGroupCall?: (call: CallRecord) => void;
 }) {
   if (!call) {
     return (
@@ -2001,7 +2004,7 @@ function CallDetailPanel({ call, onCall }: {
       </div>
       <div style={{ textAlign: 'center' }}>
         <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-primary)' }}>{call.other_party_username}</div>
-        <div style={{ fontSize: '0.82rem', color: statusColor, marginTop: 4, textTransform: 'capitalize' }}>{call.status}</div>
+        <div style={{ fontSize: '0.82rem', color: statusColor, marginTop: 4, textTransform: 'capitalize' }}>{call.is_group ? 'Group call' : call.status}</div>
       </div>
       <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border-color)', borderRadius: 12, padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: 10, minWidth: 240 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -2032,9 +2035,22 @@ function CallDetailPanel({ call, onCall }: {
         </div>
       </div>
 
-      {/* Redial straight from the history entry — the whole reason to open one. */}
+      {/* Redial straight from the history entry — the whole reason to open one.
+          A group row rings everyone who was on it, not just one person. */}
       <div style={{ display: 'flex', gap: 10 }}>
-        <button
+        {call.is_group && call.conference_id && onGroupCall ? (
+          <button
+            onClick={() => onGroupCall(call)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              background: '#25d366', color: '#062', border: 'none', borderRadius: 10,
+              padding: '0.6rem 1.1rem', fontWeight: 700, cursor: 'pointer', fontSize: '0.85rem',
+            }}
+          >
+            Call back everyone
+          </button>
+        ) : null}
+        {!call.is_group && <button
           onClick={() => onCall(call.other_party_username, 'audio')}
           style={{
             display: 'flex', alignItems: 'center', gap: 8,
@@ -2046,8 +2062,8 @@ function CallDetailPanel({ call, onCall }: {
             <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.69 12a19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 3.6 1h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.91 8.64a16 16 0 0 0 6 6l.95-.95a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>
           </svg>
           Call back
-        </button>
-        <button
+        </button>}
+        {!call.is_group && <button
           onClick={() => onCall(call.other_party_username, 'video')}
           style={{
             display: 'flex', alignItems: 'center', gap: 8,
@@ -2060,7 +2076,7 @@ function CallDetailPanel({ call, onCall }: {
             <path d="M15 10l4.553-2.553A1 1 0 0 1 21 8.382v7.236a1 1 0 0 1-1.447.894L15 14M3 8a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
           </svg>
           Video
-        </button>
+        </button>}
       </div>
     </div>
   );
@@ -2212,6 +2228,24 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
   const [waitingRoomState, setWaitingRoomState] = useState<{ conferenceId: number; initialMicOn?: boolean; initialCamOn?: boolean; displayName?: string } | null>(null);
   const [chatJoinError, setChatJoinError] = useState<string | null>(null);
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
+
+  // The caller hanging up has to stop this ring even if the socket message
+  // was missed. The status poll is that backup.
+  useEffect(() => {
+    const ringing = incomingCall;
+    if (!ringing?.callId) return;
+    let stopped = false;
+    const t = window.setInterval(async () => {
+      const st = await getCallStatus(token, ringing.callId);
+      if (stopped || !st) return;
+      if (CALL_TERMINAL_STATUSES.includes(st.status)) {
+        stopRinging();
+        setIncomingCall(cur => (cur?.callId === ringing.callId ? null : cur));
+        setMissedCall({ from: ringing.from, callType: ringing.callType });
+      }
+    }, 1500);
+    return () => { stopped = true; window.clearInterval(t); };
+  }, [incomingCall?.callId, token]);
   // Someone adding us to a call already in progress. Rings and waits for the
   // master token — an invite must not open our microphone on its own.
   const [conferenceInvite, setConferenceInvite] = useState<
@@ -2222,11 +2256,12 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
   const [confJoining, setConfJoining] = useState(false);
 
   async function joinConferenceCall() {
-    if (!conferenceInvite || !confTokenInput.trim()) return;
+    const entered = confTokenInput.trim() || masterToken;
+    if (!conferenceInvite || !entered) return;
     setConfJoining(true);
     try {
       const accepted = await conferenceAccept(
-        token, conferenceInvite.conferenceId, confTokenInput.trim(),
+        token, conferenceInvite.conferenceId, entered,
       );
       stopRinging();
       const kind = accepted.kind || conferenceInvite.kind;
@@ -2518,6 +2553,15 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
             return null;
           });
         }
+      } else if (msg.type === 'conference_invite_cancelled' || msg.type === 'conference_ended') {
+        const confId = Number((msg as any).data?.conference_id);
+        setConferenceInvite(prev => {
+          if (prev && (!confId || prev.conferenceId === confId)) {
+            stopRinging();
+            return null;
+          }
+          return prev;
+        });
       } else if (msg.type === 'conference_upgraded') {
         // The call window itself switches onto the multi-person call. Opening
         // the meeting room here is what turned a call into a meeting.
@@ -2755,6 +2799,23 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
       if (not_rung > 0) setChatJoinError(`Call is full — ${not_rung} member${not_rung === 1 ? '' : 's'} couldn't be rung`);
     } catch (err: any) {
       setChatJoinError(userMessage(err, "Couldn't start the group call. Check your connection and retry."));
+    }
+  }
+
+  async function handleGroupRedial(call: CallRecord) {
+    if (!callsSupported) { setChatJoinError(CALLS_UNAVAILABLE); return; }
+    if (!call.conference_id) return;
+    try {
+      const res = await redialGroupCall(token, call.conference_id);
+      const names = (res.participants || []).filter(n => n && n !== username).join(', ') || call.other_party_username;
+      openGroupCallWindow({
+        conference_id: res.conference_id,
+        group_id: 0,
+        group_name: names,
+        call_type: res.call_type === 'video' ? 'video' : 'voice',
+      });
+    } catch (err: any) {
+      setChatJoinError(userMessage(err, "Couldn't call them back. Check your connection and retry."));
     }
   }
 
@@ -3497,7 +3558,7 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
 
     if (activeTab === 'calls') {
       const selectedCall = calls.find(c => c.id === selectedCallId) ?? null;
-      return <CallDetailPanel call={selectedCall} onCall={handleCall} />;
+      return <CallDetailPanel call={selectedCall} onCall={handleCall} onGroupCall={handleGroupRedial} />;
     }
 
     if (activeTab === 'settings') {
@@ -3822,12 +3883,12 @@ export default function HomeScreen({ token, username, onLogout }: Props) {
                   setConferenceInvite(null);
                 }}
               >
-                Decline
+                Ignore
               </button>
               <button
-                style={{ ...ci.join, opacity: confTokenInput.trim() && !confJoining ? 1 : 0.5 }}
-                disabled={!confTokenInput.trim() || confJoining}
-                onClick={joinConferenceCall}
+                style={{ ...ci.join, opacity: (masterToken || confTokenInput.trim()) && !confJoining ? 1 : 0.5 }}
+                disabled={(!masterToken && !confTokenInput.trim()) || confJoining}
+                onClick={() => { joinConferenceCall(); }}
               >
                 {confJoining ? 'Joining…' : 'Join'}
               </button>

@@ -98,6 +98,30 @@ class CallOverlayViewModel @Inject constructor(
     private val upgradedCallIds = mutableSetOf<Int>()
 
     private var durationJob: Job? = null
+    private var incomingWatch: Job? = null
+
+    /** Backup for a missed "they hung up" socket message. Stops the ring anyway. */
+    private fun watchIncoming(callId: Int) {
+        incomingWatch?.cancel()
+        incomingWatch = viewModelScope.launch {
+            val token = sessionManager.sessionToken.first() ?: return@launch
+            repeat(40) {
+                delay(1500)
+                val ringing = _incomingCall.value ?: return@launch
+                if (ringing.callId != callId) return@launch
+                val status = runCatching {
+                    apiService.getCallStatus("Bearer $token", callId).body()?.status
+                }.getOrNull() ?: return@repeat
+                if (status in CALL_TERMINAL_STATUSES) {
+                    NotificationHelper.stopRingtone()
+                    NotificationHelper.cancelCall(context)
+                    _incomingCall.value = null
+                    _missedCall.value = MissedCallInfo(ringing.callerUsername, ringing.callType)
+                    return@launch
+                }
+            }
+        }
+    }
 
     init {
         viewModelScope.launch {
@@ -110,6 +134,7 @@ class CallOverlayViewModel @Inject constructor(
                         val callType = data.get("call_type")?.asString ?: "voice"
                         val offerSdp = data.get("offer_sdp")?.asString
                         _incomingCall.value = IncomingCallData(callId, caller, callType, offerSdp)
+                        watchIncoming(callId)
                     }
                     // Answered on another of this account's devices - stop ringing
                     // here and don't count it as missed.
@@ -142,6 +167,7 @@ class CallOverlayViewModel @Inject constructor(
                         val ringing = _incomingCall.value
                         if (ringing != null && (callId == null || callId == ringing.callId)) {
                             NotificationHelper.stopRingtone()
+                            NotificationHelper.cancelCall(context)
                             _incomingCall.value = null
                             _missedCall.value = MissedCallInfo(ringing.callerUsername, ringing.callType)
                         }
@@ -175,6 +201,15 @@ class CallOverlayViewModel @Inject constructor(
                             "Sign-in blocked",
                             "Someone tried to sign in on ${info.deviceName ?: "another device"} from ${info.location ?: "an unknown location"}.",
                         )
+                    }
+                    "conference_invite_cancelled", "conference_ended" -> {
+                        val confId = data.get("conference_id")?.asInt
+                        val invite = _conferenceInvite.value
+                        if (invite != null && (confId == null || confId == invite.conferenceId)) {
+                            NotificationHelper.stopRingtone()
+                            NotificationHelper.cancelCall(context)
+                            _conferenceInvite.value = null
+                        }
                     }
                     "conference_invite" -> {
                         val confId = data.get("conference_id")?.asInt ?: return@collect

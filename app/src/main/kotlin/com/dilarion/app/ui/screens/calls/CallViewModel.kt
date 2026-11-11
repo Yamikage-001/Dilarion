@@ -97,6 +97,8 @@ class CallViewModel @Inject constructor(
     private var iceConnectedJob: kotlinx.coroutines.Job? = null
     /** The 1:1 leg is being replaced by the multi-person call. A following "end" is not a hangup. */
     private var upgradedAway = false
+    /** User hung up before the server assigned a call id. End it as soon as that id exists. */
+    private var endRequested = false
     private var connectWatchdog: kotlinx.coroutines.Job? = null
     private val iceLock = Any()
 
@@ -130,6 +132,7 @@ class CallViewModel @Inject constructor(
 
     fun startOutgoingCall(peerUsername: String, type: CallType) {
         upgradedAway = false
+        endRequested = false
         // Drop anything left over from a previous call before building a new one,
         // otherwise the old PeerConnection keeps the mic/audio alive and the new
         // offer is created on a stale connection.
@@ -158,6 +161,11 @@ class CallViewModel @Inject constructor(
                     CallInitiateRequest(peerUsername, if (type == CallType.VIDEO) "video" else "voice", offerSdp),
                 )
                 val callId = resp.body()?.callId
+                if (endRequested && callId != null) {
+                    endRequested = false
+                    apiService.callAction("Bearer $token", CallActionRequest(callId, "end"))
+                    return@runCatching
+                }
                 if (callId != null) {
                     // Stay CALLING until WS confirms callee received; state → RINGING via WS "calling" event
                     _uiState.value = _uiState.value.copy(callId = callId)
@@ -310,11 +318,8 @@ class CallViewModel @Inject constructor(
         val callId = _uiState.value.callId
         teardownMedia()
         _uiState.value = CallUiState()
-        if (callId == null) return
-        viewModelScope.launch {
-            val token = sessionManager.sessionToken.first() ?: return@launch
-            runCatching { apiService.callAction("Bearer $token", CallActionRequest(callId, "end")) }
-        }
+        // Do not send "end". That push hangs the other person up. The server
+        // marks the 1:1 as upgraded without telling either client to leave.
     }
 
     fun endCall() {
@@ -324,7 +329,10 @@ class CallViewModel @Inject constructor(
         teardownMedia()
         _uiState.value = _uiState.value.copy(state = CallState.ENDED, endedByMe = true)
         if (confId != null) notifyConferenceLeft(sessionManager, apiService, confId)
-        if (callId == null) return
+        if (callId == null) {
+            endRequested = true
+            return
+        }
         viewModelScope.launch {
             val token = sessionManager.sessionToken.first() ?: return@launch
             runCatching { apiService.callAction("Bearer $token", CallActionRequest(callId, "end")) }

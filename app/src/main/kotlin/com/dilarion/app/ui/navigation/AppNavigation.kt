@@ -237,6 +237,11 @@ fun AppNavigation(pendingIncomingCall: IncomingCallData? = null) {
                 onCallUser = { username ->
                     navController.navigate(Screen.Call.route(username))
                 },
+                onRedialGroup = { conferenceId ->
+                    vm.redialGroup(conferenceId) { confId, callType, title ->
+                        navController.navigate(Screen.GroupCall.route(confId, 0, title, callType))
+                    }
+                },
                 onOpenGroupChat = { groupId, groupName ->
                     navController.navigate(Screen.GroupChat.route(groupId, groupName))
                 },

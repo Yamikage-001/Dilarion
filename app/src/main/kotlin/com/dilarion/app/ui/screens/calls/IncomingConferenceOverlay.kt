@@ -139,7 +139,7 @@ fun IncomingConferenceOverlay(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceEvenly,
                 ) {
-                    CallActionButton(Icons.Default.CallEnd, "Decline", EndCallRed) {
+                    CallActionButton(Icons.Default.CallEnd, "Ignore", EndCallRed) {
                         NotificationHelper.stopRingtone()
                         onDismiss()
                     }

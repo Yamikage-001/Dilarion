@@ -542,6 +542,12 @@ interface ApiService {
         @Query("device_id") deviceId: String? = null,
     ): Response<CallHistoryResponse>
 
+    @POST("calls/group/redial")
+    suspend fun redialGroupCall(
+        @Header("Authorization") bearer: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any>,
+    ): Response<com.dilarion.app.data.model.GroupRedialResponse>
+
     // ─── Conference ────────────────────────────────────────────────────────────
 
     @POST("calls/conference/create")

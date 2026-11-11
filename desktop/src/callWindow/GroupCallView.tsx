@@ -128,12 +128,17 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
   const [now, setNow] = useState(Date.now());
   const everHadOthersRef = useRef(false);
   const endedRef = useRef(false);
+  const aloneTimerRef = useRef<number | null>(null);
   // Usernames who already left. LiveKit can take a moment to drop them; until
   // it does the tile stays up and they still look like they're on the call.
   const [gone, setGone] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     const onMsg = (msg: { type: string; data?: Record<string, any> }) => {
+      if (msg.type === 'conference_ended' && Number(msg.data?.conference_id) === info.conference_id) {
+        finish('Call ended');
+        return;
+      }
       if (msg.type !== 'conference_participant_left') return;
       const data = msg.data || {};
       if (Number(data.conference_id) !== info.conference_id) return;
@@ -170,15 +175,28 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
     const othersChanged = () => {
       const others = room.remoteParticipants.size;
       if (others > 0) {
+        if (aloneTimerRef.current) { window.clearTimeout(aloneTimerRef.current); aloneTimerRef.current = null; }
         everHadOthersRef.current = true;
         setStatus('active');
         setStartedAt(prev => prev ?? Date.now());
       } else if (everHadOthersRef.current) {
-        // Everyone else hung up — end it, like WhatsApp does.
-        finish('Call ended');
+        // Video publishing can drop the other person for a moment. Ending on
+        // that blip was hanging the whole call up, including someone still
+        // deciding whether to join. Wait, and end only if they stay gone.
+        if (aloneTimerRef.current) window.clearTimeout(aloneTimerRef.current);
+        aloneTimerRef.current = window.setTimeout(() => {
+          aloneTimerRef.current = null;
+          if (!endedRef.current && room.remoteParticipants.size === 0) finish('Call ended');
+        }, 8000);
       }
       bump();
     };
+
+    let reconnecting = false;
+    let saved: { url: string; token: string; iceServers: RTCIceServer[] } | null = null;
+    const connectOpts = () => (
+      saved && saved.iceServers.length > 0 ? { rtcConfig: { iceServers: saved.iceServers } } : undefined
+    );
 
     room
       .on(RoomEvent.ParticipantConnected, othersChanged)
@@ -190,7 +208,18 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
       .on(RoomEvent.LocalTrackPublished, bump)
       .on(RoomEvent.LocalTrackUnpublished, bump)
       .on(RoomEvent.ActiveSpeakersChanged, sp => setSpeaking(new Set(sp.map(p => p.identity))))
-      .on(RoomEvent.Disconnected, () => { if (!endedRef.current) finish('Disconnected'); });
+      .on(RoomEvent.Disconnected, () => {
+        // A socket drop is not a hangup. Leaving here used to end the call
+        // for everyone still on it, which turning a camera on did by itself.
+        if (endedRef.current || cancelled || !saved) return;
+        if (reconnecting) { finish('Disconnected'); return; }
+        reconnecting = true;
+        setError('Reconnecting…');
+        room.connect(saved.url, saved.token, connectOpts()).then(() => {
+          reconnecting = false;
+          if (!endedRef.current) setError(null);
+        }).catch(() => { if (!endedRef.current) finish('Disconnected'); });
+      });
 
     (async () => {
       try {
@@ -199,12 +228,14 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
           getIceServers(token),
         ]);
         if (cancelled) return;
-        await room.connect(url, lkToken, {
-          rtcConfig: iceServers && iceServers.length > 0 ? { iceServers } : undefined,
-        });
+        saved = { url, token: lkToken, iceServers: iceServers || [] };
+        await room.connect(url, lkToken, connectOpts());
         if (cancelled) { room.disconnect(); return; }
-        await room.localParticipant.setMicrophoneEnabled(true);
-        if (info.call_type === 'video') await room.localParticipant.setCameraEnabled(true);
+        await room.localParticipant.setMicrophoneEnabled(true).catch(() => {});
+        if (info.call_type === 'video') {
+          const camOk = await room.localParticipant.setCameraEnabled(true).then(() => true).catch(() => false);
+          if (!camOk) setCamOn(false);
+        }
         if (room.remoteParticipants.size === 0) setStatus('ringing');
         othersChanged();
       } catch (err: any) {
@@ -217,6 +248,8 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
 
     return () => {
       cancelled = true;
+      if (aloneTimerRef.current) window.clearTimeout(aloneTimerRef.current);
+      endedRef.current = true;
       room.disconnect();
       roomRef.current = null;
     };

@@ -676,6 +676,23 @@ export interface CallRecord {
   /** Incoming call that this account answered on a different device. */
   answered_elsewhere?: boolean;
   answered_device_name?: string | null;
+  /** Set when the 1:1 picked up more people. Call back rings all of them. */
+  is_group?: boolean;
+  participants?: string[];
+  conference_id?: number | null;
+}
+
+export async function redialGroupCall(
+  token: string,
+  conferenceId: number,
+): Promise<{ conference_id: number; call_type: string; participants: string[] }> {
+  const res = await apiFetch(`${BASE}/calls/group/redial`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ conference_id: conferenceId }),
+  });
+  if (!res.ok) throw new Error('Could not call the group back');
+  return res.json();
 }
 
 export async function getCallHistory(token: string): Promise<CallRecord[]> {

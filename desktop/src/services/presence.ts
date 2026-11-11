@@ -14,7 +14,7 @@ export const CALL_RELEVANT_WS_TYPES = new Set([
   'call_status_update', 'ice_candidate', 'call_media_state', 'call_end',
   'conference_upgraded',
   'conference_invite', 'conference_peer_connect', 'conference_signal',
-  'conference_participant_left', 'conference_force_mute', 'auth_expired',
+  'conference_participant_left', 'conference_ended', 'conference_invite_cancelled', 'conference_force_mute', 'auth_expired',
 ]);
 const WS_FORWARD_EVENT = 'dilarion://ws-forward';
 // Emitted by the call window to the main window once its forward bridge is

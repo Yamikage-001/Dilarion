@@ -154,7 +154,11 @@ class GroupCallViewModel @Inject constructor(
                             val ids = event.speakers.mapNotNull { it.identity?.value }.toSet()
                             _uiState.value = _uiState.value.copy(tiles = _uiState.value.tiles.map { it.copy(isSpeaking = ids.contains(it.identity)) })
                         }
-                        is RoomEvent.Disconnected -> if (_uiState.value.status != GroupCallStatus.ENDED) finish("Disconnected")
+                        is RoomEvent.Disconnected -> if (_uiState.value.status != GroupCallStatus.ENDED) {
+                            // Not a hangup. Ending here was closing the call for
+                            // everyone else when a video track renegotiated.
+                            _uiState.value = _uiState.value.copy(notice = "Reconnecting…")
+                        }
                         else -> {}
                     }
                 }
@@ -170,8 +174,8 @@ class GroupCallViewModel @Inject constructor(
             }.getOrElse { emptyList() }
 
             r.connect(body.url, body.token, ConnectOptions(iceServers = iceServers))
-            r.localParticipant.setMicrophoneEnabled(true)
-            r.localParticipant.setCameraEnabled(camOn)
+            runCatching { r.localParticipant.setMicrophoneEnabled(true) }
+            if (camOn) runCatching { r.localParticipant.setCameraEnabled(true) }
             upsertTile(r.localParticipant, true)
             r.remoteParticipants.values.forEach { upsertTile(it, false) }
             if (r.remoteParticipants.isEmpty()) {
@@ -185,9 +189,12 @@ class GroupCallViewModel @Inject constructor(
         }.onFailure { e -> finish(e.toUserMessage("Couldn't connect to the call. Check your connection and retry.")) }
     }
 
+    private var aloneJob: Job? = null
+
     private fun othersChanged() {
         val others = room?.remoteParticipants?.size ?: 0
         if (others > 0) {
+            aloneJob?.cancel()
             everHadOthers = true
             noAnswerJob?.cancel()
             _uiState.value = _uiState.value.copy(
@@ -195,8 +202,13 @@ class GroupCallViewModel @Inject constructor(
                 startedAtMs = _uiState.value.startedAtMs ?: System.currentTimeMillis(),
             )
         } else if (everHadOthers) {
-            // Everyone else hung up — end it, like WhatsApp.
-            finish("Call ended")
+            // A video publish can drop the other person for a moment. Wait
+            // before deciding the call is over.
+            aloneJob?.cancel()
+            aloneJob = viewModelScope.launch {
+                delay(8000)
+                if ((room?.remoteParticipants?.size ?: 0) == 0) finish("Call ended")
+            }
         }
     }
 

@@ -856,6 +856,15 @@ data class CallHistoryItem(
     /** Incoming call this account answered on a different device. */
     @SerializedName("answered_elsewhere")   val answeredElsewhere: Boolean = false,
     @SerializedName("answered_device_name") val answeredDeviceName: String? = null,
+    @SerializedName("is_group")             val isGroup: Boolean = false,
+    val participants: List<String> = emptyList(),
+    @SerializedName("conference_id")        val conferenceId: Int? = null,
+)
+
+data class GroupRedialResponse(
+    @SerializedName("conference_id") val conferenceId: Int = 0,
+    @SerializedName("call_type") val callType: String = "voice",
+    val participants: List<String> = emptyList(),
 )
 
 data class CallHistoryResponse(

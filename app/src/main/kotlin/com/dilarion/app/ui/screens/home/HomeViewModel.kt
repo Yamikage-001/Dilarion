@@ -68,6 +68,25 @@ class HomeViewModel @Inject constructor(
         }
     }
 
+    fun redialGroup(conferenceId: Int, onReady: (Int, String, String) -> Unit) {
+        viewModelScope.launch {
+            val token = sessionManager.sessionToken.first() ?: return@launch
+            runCatching {
+                val resp = apiService.redialGroupCall("Bearer $token", mapOf("conference_id" to conferenceId))
+                val body = resp.body()
+                if (body == null || body.conferenceId == 0) {
+                    _uiState.value = _uiState.value.copy(error = "Couldn't call them back. Check your connection and retry.")
+                    return@runCatching
+                }
+                val me = _uiState.value.currentUsername
+                val names = body.participants.filter { it.isNotBlank() && it != me }.joinToString(", ").ifBlank { "Call" }
+                onReady(body.conferenceId, body.callType, names)
+            }.onFailure {
+                _uiState.value = _uiState.value.copy(error = it.toUserMessage("Couldn't call them back. Check your connection and retry."))
+            }
+        }
+    }
+
     fun loadCallHistory() {
         if (_uiState.value.isCallHistoryLoading) return
         viewModelScope.launch {

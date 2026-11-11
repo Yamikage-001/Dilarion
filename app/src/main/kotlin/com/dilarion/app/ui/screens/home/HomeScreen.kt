@@ -39,6 +39,8 @@ fun HomeScreen(
     onOpenChat: (String) -> Unit,
     /** Redial someone straight from their call-history entry. */
     onCallUser: (String) -> Unit,
+    /** Call everyone who was on a group call. */
+    onRedialGroup: (Int) -> Unit = {},
     onOpenGroupChat: (Int, String) -> Unit,
     onNewChat: () -> Unit,
     onNewGroup: () -> Unit = {},
@@ -178,7 +180,7 @@ fun HomeScreen(
                 HomeTab.MEETINGS -> MeetingsTab(onNewMeeting, onMeetings)
                 HomeTab.CALENDAR -> com.dilarion.app.ui.screens.calendar.CalendarScreen(onJoinMeeting = onJoinMeeting)
                 HomeTab.TASKS    -> com.dilarion.app.ui.screens.tasks.TasksScreen()
-                HomeTab.CALLS    -> CallsTab(uiState, uiState.currentUsername, onCallUser)
+                HomeTab.CALLS    -> CallsTab(uiState, uiState.currentUsername, onCallUser, onRedialGroup)
             }
         }
     }
@@ -306,6 +308,7 @@ private fun CallsTab(
     uiState: HomeUiState,
     currentUsername: String,
     onCallUser: (String) -> Unit,
+    onRedialGroup: (Int) -> Unit,
 ) {
     if (uiState.isCallHistoryLoading) {
         UserListSkeleton(count = 6)
@@ -319,7 +322,7 @@ private fun CallsTab(
 
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 8.dp)) {
         items(uiState.callHistory, key = { "call_${it.id}" }) { call ->
-            CallHistoryRow(call, currentUsername, onCallUser)
+            CallHistoryRow(call, currentUsername, onCallUser, onRedialGroup)
         }
     }
 }
@@ -329,19 +332,24 @@ private fun CallHistoryRow(
     call: CallHistoryItem,
     currentUsername: String,
     onCallUser: (String) -> Unit,
+    onRedialGroup: (Int) -> Unit,
 ) {
     val isOutgoing = call.isCaller
-    val peer = call.otherPartyUsername ?: "Unknown"
+    val peer = if (call.isGroup) (call.otherPartyUsername ?: "Group call") else (call.otherPartyUsername ?: "Unknown")
     val isVideo = call.callType == "video"
     val missed = call.status == "declined" || call.status == "missed" || call.status == "busy"
 
-    val canCallBack = call.otherPartyUsername != null && peer != currentUsername
+    val canCallBack = if (call.isGroup) call.conferenceId != null else call.otherPartyUsername != null && peer != currentUsername
+    val callBack = {
+        val confId = call.conferenceId
+        if (call.isGroup && confId != null) onRedialGroup(confId) else onCallUser(peer)
+    }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(SurfaceWhite)
-            .then(if (canCallBack) Modifier.clickable { onCallUser(peer) } else Modifier)
+            .then(if (canCallBack) Modifier.clickable { callBack() } else Modifier)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -369,7 +377,8 @@ private fun CallHistoryRow(
                 Text(
                     buildString {
                         append(
-                            if (isOutgoing) "Outgoing"
+                            if (call.isGroup) "Group call"
+                            else if (isOutgoing) "Outgoing"
                             else if (call.answeredElsewhere) "Answered on another device"
                             else if (missed) "Missed" else "Incoming"
                         )
@@ -388,7 +397,7 @@ private fun CallHistoryRow(
             color = TextSecondary,
         )
         if (canCallBack) {
-            IconButton(onClick = { onCallUser(peer) }) {
+            IconButton(onClick = { callBack() }) {
                 Icon(
                     if (isVideo) Icons.Default.Videocam else Icons.Default.Call,
                     "Call $peer back",

@@ -207,6 +207,8 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
   // and leave the conference — that is the call ending the moment a third
   // person is added.
   const upgradingRef = useRef(false);
+  // Hung up before the server had given this call an id. End it the moment it exists.
+  const endRequestedRef = useRef(false);
   const [confParticipants, setConfParticipants] = useState<string[]>([]);
   const [userPickerOpen, setUserPickerOpen] = useState(false);
   const [userSearch, setUserSearch] = useState('');
@@ -390,6 +392,11 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     try {
       const { call_id } = await initiateCall(token, partner, callType, pc.localDescription!.sdp);
       callIdRef.current = call_id;
+      if (endRequestedRef.current) {
+        endRequestedRef.current = false;
+        performCallAction(token, call_id, 'end').catch(() => {});
+        return;
+      }
       // Flush any late-arriving candidates
       const buffered = iceBufRef.current.splice(0);
       buffered.forEach(c => sendCallIceCandidate(token, call_id, partner, c).catch(() => {}));
@@ -749,7 +756,8 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     if (onUpgradeToGallery && confId) {
       upgradingRef.current = true;
       const id = confId;
-      if (callIdRef.current) performCallAction(token, callIdRef.current, 'end').catch(() => {});
+      // Do not send "end" for the 1:1. The server records it as upgraded, and
+      // an "end" push was hanging up the other person before they joined.
       if (reconnectTimerRef.current) { clearTimeout(reconnectTimerRef.current); reconnectTimerRef.current = null; }
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
       stopAllMedia();
@@ -832,6 +840,10 @@ export default function CallModal({ token, partner, callType, isIncoming, callId
     if (upgradingRef.current) return;
     if (callIdRef.current) {
       performCallAction(token, callIdRef.current, 'end').catch(() => {});
+    } else {
+      // Still setting the call up. Remember the hangup so the ring never starts,
+      // or is cancelled the instant the server assigns an id.
+      endRequestedRef.current = true;
     }
     finishCall();
     // We chose to hang up, so there is nothing to offer a call back for — close.
