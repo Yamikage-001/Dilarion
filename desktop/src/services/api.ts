@@ -908,8 +908,12 @@ export async function getLiveKitToken(token: string, conferenceId: number, displ
     headers: { Authorization: `Bearer ${token}` },
   });
   if (!res.ok) {
+    let detail = '';
+    try { detail = String((await res.clone().json())?.detail ?? ''); } catch { /* body isn't json */ }
     const err: Error & { status?: number } = new Error(
-      res.status === 503 ? 'Group video is not set up on this server yet' : `Failed to get video token (${res.status})`,
+      res.status === 503
+        ? 'Group video is not set up on this server yet'
+        : (detail || `Failed to get video token (${res.status})`),
     );
     err.status = res.status;
     throw err;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Room, RoomEvent, Track, Participant } from 'livekit-client';
+import { Room, RoomEvent, Track, Participant, RemoteTrackPublication } from 'livekit-client';
 import { getLiveKitToken, getIceServers, conferenceLeave } from '../services/api';
 import { presenceService } from '../services/presence';
 import { userMessage } from '../services/errors';
@@ -222,27 +222,44 @@ export default function GroupCallView({ token, myUsername, info, onEnd }: {
       });
 
     (async () => {
-      try {
-        const [{ url, token: lkToken }, iceServers] = await Promise.all([
-          getLiveKitToken(token, info.conference_id, myUsername),
-          getIceServers(token),
-        ]);
-        if (cancelled) return;
-        saved = { url, token: lkToken, iceServers: iceServers || [] };
-        await room.connect(url, lkToken, connectOpts());
-        if (cancelled) { room.disconnect(); return; }
-        await room.localParticipant.setMicrophoneEnabled(true).catch(() => {});
-        if (info.call_type === 'video') {
-          const camOk = await room.localParticipant.setCameraEnabled(true).then(() => true).catch(() => false);
-          if (!camOk) setCamOn(false);
+      let lastErr: unknown = null;
+      for (let attempt = 0; attempt < 4 && !cancelled; attempt++) {
+        try {
+          const [{ url, token: lkToken }, iceServers] = await Promise.all([
+            getLiveKitToken(token, info.conference_id, myUsername),
+            getIceServers(token),
+          ]);
+          if (cancelled) return;
+          saved = { url, token: lkToken, iceServers: iceServers || [] };
+          await room.connect(url, lkToken, connectOpts());
+          if (cancelled) { room.disconnect(); return; }
+          await room.localParticipant.setMicrophoneEnabled(true).catch(() => {});
+          if (info.call_type === 'video') {
+            const camOk = await room.localParticipant.setCameraEnabled(true).then(() => true).catch(() => false);
+            if (!camOk) setCamOn(false);
+          }
+          // A token that can publish but not subscribe is how two people on a
+          // three-person video call ended up seeing only themselves.
+          room.remoteParticipants.forEach(p => {
+            p.videoTrackPublications.forEach(pub => {
+              if (pub instanceof RemoteTrackPublication && pub.source === Track.Source.Camera) {
+                try { pub.setSubscribed(true); } catch { /* already on */ }
+              }
+            });
+          });
+          if (room.remoteParticipants.size === 0) setStatus('ringing');
+          othersChanged();
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          try { room.disconnect(); } catch { /* not connected yet */ }
+          if (attempt < 3 && !cancelled) await new Promise(r => setTimeout(r, 700 * (attempt + 1)));
         }
-        if (room.remoteParticipants.size === 0) setStatus('ringing');
-        othersChanged();
-      } catch (err: any) {
-        if (!cancelled) {
-          setError(userMessage(err, "Couldn't connect to the call. Check your connection and retry."));
-          setStatus('ended');
-        }
+      }
+      if (lastErr && !cancelled) {
+        setError(userMessage(lastErr, "Couldn't connect to the call. Check your connection and retry."));
+        setStatus('ended');
       }
     })();
 

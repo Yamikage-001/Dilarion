@@ -9,7 +9,8 @@ import IdleLockScreen from './components/IdleLockScreen';
 import { ensureDeviceRegistered } from './services/keys';
 import { logoutSession } from './services/api';
 import { getLockedUser, isIdleExpired, markActive, setLockedUser } from './services/idleLock';
-import { runUpdateCheck } from './services/updater';
+import UpdateRequiredScreen from './components/UpdateRequiredScreen';
+import { checkForUpdate, type AvailableUpdate } from './services/updater';
 import {
   SESSION_KEY,
   SESSION_INVALID_EVENT,
@@ -70,10 +71,12 @@ export default function App() {
   // QR linking is the default entry, username/token sign-in is the fallback.
   const [usePassword, setUsePassword] = useState(false);
   const [startView, setStartView] = useState<LoginView>('login');
+  const [requiredUpdate, setRequiredUpdate] = useState<AvailableUpdate | null>(null);
 
-  // ── OTA auto-update (production desktop build only) ────────────────────────
+  // Production desktop only. Once an update is found the screen stays up
+  // until the user taps Update. Nothing else in the app is reachable.
   useEffect(() => {
-    runUpdateCheck();
+    checkForUpdate().then(update => { if (update) setRequiredUpdate(update); });
   }, []);
 
   // ── Session retired server-side ──────────────────────────────────────────
@@ -153,6 +156,9 @@ export default function App() {
     setSession(null);
   }
 
+  if (requiredUpdate) {
+    return <UpdateRequiredScreen version={requiredUpdate.version} onUpdate={requiredUpdate.install} />;
+  }
   if (session) {
     return (
       <SetupWizard token={session.token} username={session.username}>

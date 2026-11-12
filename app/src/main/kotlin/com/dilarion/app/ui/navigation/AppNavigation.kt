@@ -41,6 +41,13 @@ import com.dilarion.app.ui.screens.splash.SplashScreen
 
 @Composable
 fun AppNavigation(pendingIncomingCall: IncomingCallData? = null) {
+    // A newer APK is published. This screen stays until the user taps Update.
+    val requiredUpdate by com.dilarion.app.update.AppUpdater.state.collectAsState()
+    if (requiredUpdate != null) {
+        com.dilarion.app.update.UpdateRequiredScreen()
+        return
+    }
+
     // Idle auto-logout: the session was dropped; access token required to continue.
     val idleLockedUser by com.dilarion.app.security.IdleLogoutManager.lockedUser.collectAsState()
     idleLockedUser?.let { user ->

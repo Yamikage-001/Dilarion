@@ -1,17 +1,18 @@
 package com.dilarion.app.update
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
-import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.dilarion.app.BuildConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -22,104 +23,79 @@ import java.io.File
 /**
  * GitHub-hosted OTA update for the production Android build.
  *
- * On launch it reads a small JSON published alongside each GitHub release
- * (android-latest.json), compares versionCode, and if a newer signed APK is
- * available offers to download and install it. Android always shows its own
- * "install this app?" screen — a sideloaded update can never be silent — and
- * the new APK must be signed with the SAME keystore as the installed app, or
- * the system rejects it.
+ * On launch it reads android-latest.json, compares versionCode, and if a newer
+ * signed APK exists the app stays on [UpdateRequiredScreen] until the user taps
+ * Update. Android still shows its own install confirmation after that. The new
+ * APK must be signed with the same keystore as the installed app.
  *
- * Only the production flavor updates; the staging/test and debug builds are
- * left alone, matching the desktop updater.
+ * Only the production flavor updates. Staging and debug builds are left alone.
  */
 object AppUpdater {
     private const val TAG = "AppUpdater"
     private const val MANIFEST_URL =
         "https://github.com/Yamikage-001/Dilarion/releases/latest/download/android-latest.json"
 
-    private val http = OkHttpClient()
-
-    private data class UpdateInfo(
-        val versionCode: Int,
+    data class RequiredUpdate(
         val versionName: String,
-        val notes: String,
         val url: String,
+        val busy: Boolean = false,
+        val message: String? = null,
     )
+
+    private val http = OkHttpClient()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val _state = MutableStateFlow<RequiredUpdate?>(null)
+    val state: StateFlow<RequiredUpdate?> = _state
 
     fun checkOnLaunch(activity: Activity) {
         if (BuildConfig.FLAVOR != "production" || BuildConfig.DEBUG) return
-        CoroutineScope(Dispatchers.Main).launch {
+        if (_state.value != null) return
+        scope.launch {
             try {
                 val info = withContext(Dispatchers.IO) { fetchManifest() } ?: return@launch
                 if (info.versionCode <= BuildConfig.VERSION_CODE) return@launch
-                promptInstall(activity, info)
+                _state.value = RequiredUpdate(versionName = info.versionName, url = info.url)
             } catch (e: Exception) {
                 Log.d(TAG, "update check skipped: ${e.message}")
             }
         }
     }
 
-    private fun fetchManifest(): UpdateInfo? {
-        val req = Request.Builder().url(MANIFEST_URL).header("Accept", "application/json").build()
-        http.newCall(req).execute().use { res ->
-            if (!res.isSuccessful) return null
-            val body = res.body?.string() ?: return null
-            val j = JSONObject(body)
-            val url = j.optString("url").ifBlank { return null }
-            return UpdateInfo(
-                versionCode = j.optInt("versionCode", 0),
-                versionName = j.optString("versionName", "?"),
-                notes = j.optString("notes", ""),
-                url = url,
-            )
-        }
-    }
-
-    private fun promptInstall(activity: Activity, info: UpdateInfo) {
-        AlertDialog.Builder(activity)
-            .setTitle("Update available")
-            .setMessage(
-                "Dilarion ${info.versionName} is available." +
-                    (if (info.notes.isNotBlank()) "\n\n${info.notes}" else "") +
-                    "\n\nDownload and install now?"
-            )
-            .setPositiveButton("Update") { _, _ -> ensurePermissionThenDownload(activity, info) }
-            .setNegativeButton("Later", null)
-            .setCancelable(true)
-            .show()
-    }
-
-    private fun ensurePermissionThenDownload(activity: Activity, info: UpdateInfo) {
+    fun beginUpdate(activity: Activity) {
+        val current = _state.value ?: return
+        if (current.busy) return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !activity.packageManager.canRequestPackageInstalls()
         ) {
-            Toast.makeText(
-                activity,
-                "Allow Dilarion to install updates, then tap Update again",
-                Toast.LENGTH_LONG
-            ).show()
+            _state.value = current.copy(
+                message = "Allow Dilarion to install updates, then tap Update again.",
+            )
             activity.startActivity(
                 Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${activity.packageName}")
+                    Uri.parse("package:${activity.packageName}"),
                 )
             )
             return
         }
-        downloadAndInstall(activity, info)
-    }
-
-    private fun downloadAndInstall(activity: Activity, info: UpdateInfo) {
-        Toast.makeText(activity, "Downloading update…", Toast.LENGTH_SHORT).show()
-        CoroutineScope(Dispatchers.Main).launch {
+        _state.value = current.copy(busy = true, message = null)
+        scope.launch {
             val apk = try {
-                withContext(Dispatchers.IO) { downloadApk(activity, info.url) }
+                withContext(Dispatchers.IO) { downloadApk(activity, current.url) }
             } catch (e: Exception) {
                 Log.e(TAG, "download failed", e)
                 null
             }
-            if (apk == null) {
-                Toast.makeText(activity, "Couldn't download the update. Check your connection and try again.", Toast.LENGTH_LONG).show()
+            val still = _state.value
+            if (apk == null || still == null) {
+                _state.value = current.copy(
+                    busy = false,
+                    message = "Couldn't download the update. Check your connection and try again.",
+                )
+                return@launch
+            }
+            if (activity.isDestroyed) {
+                _state.value = current.copy(busy = false)
                 return@launch
             }
             val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", apk)
@@ -130,10 +106,28 @@ object AppUpdater {
             }
             try {
                 activity.startActivity(intent)
+                _state.value = current.copy(busy = false, message = null)
             } catch (e: Exception) {
                 Log.e(TAG, "install intent failed", e)
-                Toast.makeText(activity, "Couldn't open the installer", Toast.LENGTH_SHORT).show()
+                _state.value = current.copy(busy = false, message = "Couldn't open the installer.")
             }
+        }
+    }
+
+    private data class Manifest(val versionCode: Int, val versionName: String, val url: String)
+
+    private fun fetchManifest(): Manifest? {
+        val req = Request.Builder().url(MANIFEST_URL).header("Accept", "application/json").build()
+        http.newCall(req).execute().use { res ->
+            if (!res.isSuccessful) return null
+            val body = res.body?.string() ?: return null
+            val j = JSONObject(body)
+            val url = j.optString("url").ifBlank { return null }
+            return Manifest(
+                versionCode = j.optInt("versionCode", 0),
+                versionName = j.optString("versionName", "?"),
+                url = url,
+            )
         }
     }
 

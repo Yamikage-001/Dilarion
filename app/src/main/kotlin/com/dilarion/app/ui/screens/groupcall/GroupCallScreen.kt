@@ -17,16 +17,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
-import io.livekit.android.renderer.TextureViewRenderer
+import io.livekit.android.compose.ui.VideoTrackView
 import io.livekit.android.room.Room
-import io.livekit.android.room.track.VideoTrack
 import kotlinx.coroutines.delay
 
 private val CallBg = Color(0xFF0B141A)
@@ -78,13 +75,15 @@ fun GroupCallScreen(
     LaunchedEffect(Unit) { permissionLauncher.launch(permissions) }
 
     // Close shortly after the call ends so the reason ("No answer") is readable.
+    // Hangup itself is the ViewModel being cleared. Doing it from onDispose
+    // marked people as having left while the screen was only being recreated,
+    // and the room token then came back as a signed-out session.
     LaunchedEffect(state.status) {
         if (state.status == GroupCallStatus.ENDED) {
             delay(if (state.endReason != null) 1500 else 0)
             onClose()
         }
     }
-    DisposableEffect(Unit) { onDispose { viewModel.finish(null) } }
 
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(state.status) {
@@ -200,7 +199,9 @@ private fun EveryoneGrid(tiles: List<GroupCallTile>, room: Room, modifier: Modif
         1 -> CallTile(room, tiles[0], modifier)
         2 -> Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             tiles.forEach { tile ->
-                CallTile(room, tile, Modifier.weight(1f).fillMaxWidth())
+                key(tile.identity) {
+                    CallTile(room, tile, Modifier.weight(1f).fillMaxWidth())
+                }
             }
         }
         else -> Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -210,7 +211,9 @@ private fun EveryoneGrid(tiles: List<GroupCallTile>, room: Room, modifier: Modif
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     row.forEach { tile ->
-                        CallTile(room, tile, Modifier.weight(1f).fillMaxHeight())
+                        key(tile.identity) {
+                            CallTile(room, tile, Modifier.weight(1f).fillMaxHeight())
+                        }
                     }
                     if (row.size == 1) Spacer(Modifier.weight(1f))
                 }
@@ -221,16 +224,25 @@ private fun EveryoneGrid(tiles: List<GroupCallTile>, room: Room, modifier: Modif
 
 @Composable
 private fun CallTile(room: Room, tile: GroupCallTile, modifier: Modifier) {
+    val shape = RoundedCornerShape(14.dp)
+    val track = tile.videoTrack
+    val showVideo = tile.camOn && track != null
+    // Clipping an ancestor of a TextureView drops every surface but the first
+    // on a lot of phones, so two people only saw themselves.
     Box(
         modifier
-            .clip(RoundedCornerShape(14.dp))
-            .background(TileBg)
-            .border(3.dp, if (tile.isSpeaking) SpeakingGreen else Color.Transparent, RoundedCornerShape(14.dp)),
+            .then(if (showVideo) Modifier else Modifier.clip(shape))
+            .background(TileBg, shape)
+            .border(3.dp, if (tile.isSpeaking) SpeakingGreen else Color.Transparent, shape),
         contentAlignment = Alignment.Center,
     ) {
-        val track = tile.videoTrack
-        if (tile.camOn && track != null) {
-            TrackView(room, track)
+        if (showVideo && track != null) {
+            VideoTrackView(
+                videoTrack = track,
+                modifier = Modifier.fillMaxSize(),
+                room = room,
+                mirror = tile.isLocal,
+            )
         } else {
             Box(
                 Modifier.size(72.dp).clip(CircleShape).background(colorFor(tile.displayName)),
@@ -253,18 +265,6 @@ private fun CallTile(room: Room, tile: GroupCallTile, modifier: Modifier) {
             Text(if (tile.isLocal) "You" else tile.displayName, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         }
     }
-}
-
-@Composable
-private fun TrackView(room: Room, videoTrack: VideoTrack) {
-    val context = LocalContext.current
-    val renderer = remember(context) { TextureViewRenderer(context).also { room.initVideoRenderer(it) } }
-    DisposableEffect(videoTrack) {
-        videoTrack.addRenderer(renderer)
-        onDispose { videoTrack.removeRenderer(renderer) }
-    }
-    DisposableEffect(Unit) { onDispose { renderer.release() } }
-    AndroidView(factory = { renderer }, modifier = Modifier.fillMaxSize())
 }
 
 @Composable

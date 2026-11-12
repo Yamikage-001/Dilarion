@@ -1,25 +1,32 @@
 import { isTauri } from './platform';
 
-// OTA auto-update for the production desktop build. On launch it asks the
-// update endpoint (GitHub Releases latest.json) whether a newer, signed version
-// exists; if so it downloads, installs and relaunches. The test build ships an
-// empty endpoints list, so check() finds nothing and this is a no-op there, and
-// on the web build isTauri() is false so it never runs.
+// A newer signed desktop build is waiting. The app does not install it until
+// the user taps Update on the static screen.
+export interface AvailableUpdate {
+  version: string;
+  install: () => Promise<void>;
+}
+
 let ranOnce = false;
 
-export async function runUpdateCheck(): Promise<void> {
-  if (ranOnce || !isTauri()) return;
+export async function checkForUpdate(): Promise<AvailableUpdate | null> {
+  if (ranOnce || !isTauri()) return null;
   ranOnce = true;
   try {
     const { check } = await import('@tauri-apps/plugin-updater');
     const update = await check();
-    if (!update) return;
-    // Download + install the signed package, then relaunch into the new version.
-    await update.downloadAndInstall();
-    const { relaunch } = await import('@tauri-apps/plugin-process');
-    await relaunch();
+    if (!update) return null;
+    return {
+      version: update.version,
+      install: async () => {
+        await update.downloadAndInstall();
+        const { relaunch } = await import('@tauri-apps/plugin-process');
+        await relaunch();
+      },
+    };
   } catch {
-    // No endpoints (test build), offline, or no update available — ignore and
-    // let the app keep running on the current version.
+    // No endpoints (test build), offline, or the check itself failed.
+    // Leave the current version running. There is nothing to show.
+    return null;
   }
 }

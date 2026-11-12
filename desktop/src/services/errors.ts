@@ -27,6 +27,16 @@ export function userMessage(err: unknown, fallback: string): string {
   }
 
   if (status === 401 || status === 403) {
+    // A LiveKit room rejecting its own token, or this call not being in the
+    // room yet, is not the chat session dying. Saying so was hanging the
+    // call up and sending people to sign in again.
+    const name = String((err as { name?: string })?.name ?? '');
+    if (
+      name === 'ConnectionError' ||
+      /video token|not an active participant|waiting for the host|livekit/i.test(raw)
+    ) {
+      return fallback;
+    }
     return 'Your session expired. Please sign in again.';
   }
   if (status === 413) {
